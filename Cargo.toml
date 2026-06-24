@@ -1,0 +1,34 @@
+[package]
+name = "timetracker"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform time tracker (GPUI)"
+
+[dependencies]
+# UI — gpui + gpui_platform pinned to the EXACT rev gpui-component depends on.
+# DO NOT loosen these revs independently: gpui and gpui-component must resolve
+# to ONE gpui git rev or you get type-mismatch compile errors (the #1 footgun).
+gpui          = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit"] }
+gpui-component        = { git = "https://github.com/longbridge/gpui-component", rev = "a0ae3a37b960b732801782dd8c27cb993ff57b59" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "a0ae3a37b960b732801782dd8c27cb993ff57b59" }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Dates (chrono 0.4 — same major as gpui-component's Calendar Date wrapper)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Per-OS app-data dir for the .db
+directories = "5"
+
+# Native save dialog (export)
+rfd = "0.15"
+
+# Export formats
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+anyhow = "1"

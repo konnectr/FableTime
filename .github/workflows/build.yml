@@ -10,6 +10,17 @@ on:
 # Needed so the tag build can publish a GitHub Release with the binaries.
 permissions:
   contents: write
+  # id-token is used by SignPath's GitHub App when signing is enabled (see below).
+  id-token: write
+
+# --- Optional Windows code signing (SignPath, free for OSS) -------------------
+# OFF until configured — the signing step is skipped and the Windows binary ships
+# unsigned. To enable:
+#   1. Install the SignPath GitHub App on this repository.
+#   2. On signpath.io create a project + artifact configuration + signing policy.
+#   3. Add repo Variables: SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG,
+#      SIGNPATH_SIGNING_POLICY_SLUG; and a repo Secret: SIGNPATH_API_TOKEN.
+# Once those exist, tag builds sign the Windows .exe before attaching it.
 
 jobs:
   build:
@@ -34,8 +45,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GPUI's Linux backend (Blade/Vulkan + wayland/x11 + fontconfig) needs
-      # these dev packages or the build fails at link time.
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
@@ -48,8 +57,6 @@ jobs:
             libssl-dev libzstd-dev \
             pkg-config cmake clang
 
-      # Xcode 26 ships `metal` as a stub; the Metal Toolchain is a separate
-      # on-demand component. Download it only if it isn't already present.
       - name: Ensure Metal toolchain
         if: runner.os == 'macOS'
         run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
@@ -67,14 +74,34 @@ jobs:
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
 
       - name: Upload artifact
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
+      # Sign the Windows binary if SignPath is configured (repo vars present).
+      - name: Sign Windows binary (SignPath)
+        id: sign
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_PROJECT_SLUG != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-signed
+
+      - name: Use signed Windows binary
+        if: steps.sign.outcome == 'success'
+        shell: bash
+        run: cp "dist-signed/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
+
       # On a v* tag, publish (or append to) the GitHub Release and attach the
-      # binary. Each matrix job appends its own platform binary.
+      # (signed, if applicable) binary. Each matrix job appends its own platform.
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

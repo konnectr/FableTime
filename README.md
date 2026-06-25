@@ -90,6 +90,12 @@ Choosing a period + formats and clicking **Export** writes the selected formats 
 Pushing a `v*` tag also **publishes a GitHub Release** with all three binaries attached. See
 [CHANGELOG.md](CHANGELOG.md).
 
+### Windows SmartScreen
+
+The Windows binary isn't code-signed yet, so on first run SmartScreen shows an "unrecognized app"
+prompt — click **More info → Run anyway**. Code signing (via SignPath, free for OSS) is being set
+up to remove this; the CI workflow already has the signing step, gated until it's configured.
+
 ## Project layout
 
 ```

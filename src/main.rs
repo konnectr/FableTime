@@ -1,6 +1,9 @@
 // Some DB/model helpers (e.g. archive, in-memory open, decimal-hours) are
 // intentional API surface not yet wired into the UI.
 #![allow(dead_code)]
+// On Windows, release builds use the GUI subsystem so the app doesn't spawn a
+// console window. Debug builds keep the console (handy for stderr logging).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod db;

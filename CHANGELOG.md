@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.1] — 2026-06-25
+
+### Fixed
+- Windows: the app no longer opens a console window alongside it — release builds
+  now use the Windows GUI subsystem.
+
 ## [0.1.0] — 2026-06-25
 
 First release — a cross-platform desktop time tracker built in Rust on GPUI with
@@ -29,4 +35,5 @@ local SQLite storage, styled to match the approved Time Tracker design.
 - Prebuilt binaries for Windows, macOS and Linux are attached to this release (built
   by CI). Building on macOS needs the Xcode Metal toolchain — see the README.
 
+[0.1.1]: https://github.com/konnectr/FableTime/releases/tag/v0.1.1
 [0.1.0]: https://github.com/konnectr/FableTime/releases/tag/v0.1.0

@@ -76,6 +76,12 @@ A single SQLite file `timetracker.db` is created in your OS application-data dir
 `~/.local/share/timetracker/` on Linux, `%APPDATA%\timetracker\TimeTracker\data\` on Windows.
 Your data persists across restarts.
 
+## Privacy
+
+FableTime stores everything — projects, entries, settings — in a local SQLite file on your own
+device. There is no account, no server, no telemetry, and no network access: nothing you track
+ever leaves your machine.
+
 ## Export formats
 
 Choosing a period + formats and clicking **Export** writes the selected formats into a folder:

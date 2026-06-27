@@ -51,6 +51,7 @@ pub struct CalendarView {
     start_in: Entity<InputState>,
     end_in: Entity<InputState>,
     form_project: Option<Id>,
+    form_picker_open: bool,
     form_day: usize,
     editing_id: Option<Id>,
 }
@@ -68,6 +69,7 @@ impl CalendarView {
             start_in,
             end_in,
             form_project: None,
+            form_picker_open: false,
             form_day: Local::now().date_naive().weekday().num_days_from_monday() as usize,
             editing_id: None,
         }
@@ -75,6 +77,7 @@ impl CalendarView {
 
     fn reset_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_id = None;
+        self.form_picker_open = false;
         self.desc.update(cx, |s, cx| s.set_value("", window, cx));
         self.start_in.update(cx, |s, cx| s.set_value("", window, cx));
         self.end_in.update(cx, |s, cx| s.set_value("", window, cx));
@@ -266,6 +269,7 @@ impl Render for CalendarView {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.editing_id = Some(id);
                         this.form_project = Some(pid);
+                        this.form_picker_open = false;
                         this.form_day = day;
                         let (s, e, d2) = (sh.clone(), eh.clone(), desc.clone());
                         this.desc.update(cx, |st, cx| st.set_value(d2, window, cx));
@@ -293,11 +297,10 @@ impl Render for CalendarView {
 
         // --- form below ------------------------------------------------------
         let editing = self.editing_id.is_some();
-        let sel_pid = self.form_project.or_else(|| projects.first().map(|p| p.id));
-        let sel = sel_pid.and_then(|id| projects.iter().find(|p| p.id == id));
-        let sel_name = sel.map(|p| p.name.clone()).unwrap_or_else(|| "Нет проектов".into());
-        let sel_color = sel.map(|p| palette::hex_to_u32(&p.color)).unwrap_or(palette::MUTED);
-        let proj_ids: Vec<Id> = projects.iter().map(|p| p.id).collect();
+        let sel_pid = self
+            .form_project
+            .or_else(|| projects.first().map(|p| p.id))
+            .unwrap_or(0);
 
         let day_buttons = h_flex().gap(px(4.)).children((0..7).map(|i| {
             let on = self.form_day == i;
@@ -314,23 +317,23 @@ impl Render for CalendarView {
                 }))
         }));
 
-        let proj_chip = div()
-            .id("cal-proj")
-            .flex().items_center().gap(px(8.)).px(px(12.)).py(px(8.))
-            .border_1().border_color(rgb(palette::BORDER)).rounded(px(9.)).cursor_pointer()
-            .bg(rgb(0xfcfcfd)).text_size(px(13.)).font_medium().text_color(rgb(0x3f3f46))
-            .child(crate::ui::common::dot(sel_color, 8.))
-            .child(div().child(sel_name))
-            .child(Icon::new(IconName::ChevronDown).xsmall().text_color(rgb(palette::MUTED)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if proj_ids.is_empty() {
-                    return;
-                }
-                let cur = this.form_project.or_else(|| proj_ids.first().copied());
-                let idx = cur.and_then(|c| proj_ids.iter().position(|x| *x == c)).unwrap_or(0);
-                this.form_project = Some(proj_ids[(idx + 1) % proj_ids.len()]);
+        let proj_col = crate::ui::common::project_dropdown(
+            "cal-proj",
+            &projects,
+            sel_pid,
+            self.form_picker_open,
+            220.0,
+            |this: &mut Self, cx| {
+                this.form_picker_open = !this.form_picker_open;
                 cx.notify();
-            }));
+            },
+            std::rc::Rc::new(|this: &mut Self, pid, cx| {
+                this.form_project = Some(pid);
+                this.form_picker_open = false;
+                cx.notify();
+            }),
+            cx,
+        );
 
         let mut buttons = h_flex().gap(px(8.)).child(
             div()
@@ -375,8 +378,8 @@ impl Render for CalendarView {
             .border_1().border_color(rgb(palette::BORDER)).rounded(px(14.)).bg(rgb(palette::CARD))
             .child(div().text_size(px(13.)).font_semibold().text_color(rgb(palette::LABEL)).child(if editing { "Редактировать запись" } else { "Новая запись" }))
             .child(
-                h_flex().gap(px(8.)).items_center().flex_wrap()
-                    .child(proj_chip)
+                h_flex().gap(px(8.)).items_start().flex_wrap()
+                    .child(proj_col)
                     .child(div().flex_1().min_w(px(160.)).child(Input::new(&self.desc)))
                     .child(div().w(px(92.)).child(Input::new(&self.start_in)))
                     .child(div().w(px(92.)).child(Input::new(&self.end_in))),

@@ -132,75 +132,25 @@ impl TrackerView {
     fn edit_row(
         &self,
         projects: &[crate::models::Project],
-        proj_ids: &[Id],
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let ep = projects
-            .iter()
-            .find(|p| p.id == self.edit_pid)
-            .or_else(|| projects.first());
-        let ename = ep.map(|p| p.name.clone()).unwrap_or_else(|| "—".into());
-        let ecolor = ep.map(|p| palette::hex_to_u32(&p.color)).unwrap_or(palette::MUTED);
-        let _ = proj_ids;
-
-        let chip = h_flex()
-            .id("edit-proj")
-            .items_center()
-            .gap(px(8.))
-            .px(px(12.))
-            .py(px(8.))
-            .border_1()
-            .border_color(rgb(palette::BORDER))
-            .rounded(px(9.))
-            .cursor_pointer()
-            .bg(rgb(0xfcfcfd))
-            .text_size(px(13.))
-            .font_medium()
-            .text_color(rgb(0x3f3f46))
-            .child(dot(ecolor, 8.))
-            .child(div().child(ename))
-            .child(Icon::new(IconName::ChevronDown).xsmall().text_color(rgb(palette::MUTED)))
-            .on_click(cx.listener(|this, _, _, cx| {
+        let proj_col = crate::ui::common::project_dropdown(
+            "edit-proj",
+            projects,
+            self.edit_pid,
+            self.edit_picker_open,
+            250.0,
+            |this: &mut Self, cx| {
                 this.edit_picker_open = !this.edit_picker_open;
                 cx.notify();
-            }));
-
-        // Inline dropdown: a vertical list of projects (expands the form, no clipping).
-        let picker = self.edit_picker_open.then(|| {
-            v_flex()
-                .w_full()
-                .mt(px(2.))
-                .p(px(6.))
-                .border_1()
-                .border_color(rgb(palette::BORDER))
-                .rounded(px(11.))
-                .bg(rgb(palette::CARD))
-                .shadow_lg()
-                .children(projects.iter().map(|p| {
-                    let pid = p.id;
-                    let selected = self.edit_pid == pid;
-                    h_flex()
-                        .id(("edit-pick", pid as usize))
-                        .items_center()
-                        .gap(px(9.))
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(rgb(0xf7f7fb)))
-                        .text_size(px(13.))
-                        .child(dot(palette::hex_to_u32(&p.color), 9.))
-                        .child(div().flex_1().child(p.name.clone()))
-                        .when(selected, |d| {
-                            d.child(Icon::new(IconName::Check).xsmall().text_color(rgb(palette::ACCENT)))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit_pid = pid;
-                            this.edit_picker_open = false;
-                            cx.notify();
-                        }))
-                }))
-        });
+            },
+            std::rc::Rc::new(|this: &mut Self, pid, cx| {
+                this.edit_pid = pid;
+                this.edit_picker_open = false;
+                cx.notify();
+            }),
+            cx,
+        );
 
         let buttons = h_flex()
             .gap(px(6.))
@@ -233,26 +183,29 @@ impl TrackerView {
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx))),
             );
 
-        let controls = h_flex()
-            .flex_wrap()
+        let times = h_flex()
             .items_center()
-            .gap(px(8.))
-            .child(chip)
-            .child(div().flex_1().min_w(px(140.)).child(Input::new(&self.edit_desc)))
+            .gap(px(6.))
             .child(div().w(px(72.)).child(Input::new(&self.edit_start)))
             .child(div().text_color(rgb(palette::MUTED)).child("–"))
-            .child(div().w(px(72.)).child(Input::new(&self.edit_end)))
-            .child(buttons);
+            .child(div().w(px(72.)).child(Input::new(&self.edit_end)));
 
         v_flex()
-            .gap(px(8.))
             .px(px(14.))
             .py(px(12.))
             .border_b_1()
             .border_color(rgb(palette::HAIRLINE_2))
             .bg(rgb(0xfafaff))
-            .child(controls)
-            .children(picker)
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(proj_col)
+                    .child(div().flex_1().min_w(px(140.)).child(Input::new(&self.edit_desc)))
+                    .child(times)
+                    .child(buttons),
+            )
     }
 
     fn start_or_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -447,14 +400,13 @@ impl Render for TrackerView {
         });
 
         let run_id = running.as_ref().map(|r| r.0);
-        let proj_ids: Vec<Id> = projects.iter().map(|p| p.id).collect();
         let rows = entries
             .iter()
             .filter(|e| Some(e.entry.id) != run_id)
             .map(|e| {
                 let id = e.entry.id;
                 if self.edit_id == Some(id) {
-                    return self.edit_row(&projects, &proj_ids, cx);
+                    return self.edit_row(&projects, cx);
                 }
                 let pid = e.project_id;
                 let raw_desc = e.entry.description.clone().unwrap_or_default();

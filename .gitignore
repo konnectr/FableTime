@@ -1,4 +1,6 @@
 /target
+/dist
+*.iconset
 *.db
 *.db-shm
 *.db-wal

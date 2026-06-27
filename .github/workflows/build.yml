@@ -40,7 +40,7 @@ jobs:
             artifact: timetracker-linux
           - os: macos-latest
             bin: timetracker
-            asset: timetracker-macos
+            asset: FableTime-macos.zip
             artifact: timetracker-macos
           - os: windows-latest
             bin: timetracker.exe
@@ -71,11 +71,20 @@ jobs:
       - name: Build (release)
         run: cargo build --release
 
-      - name: Package binary
+      # macOS ships as a FableTime.app bundle (icon + Dock/Finder presence),
+      # zipped with ditto so the bundle structure survives. Others ship the
+      # bare binary.
+      - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            bash scripts/bundle-macos.sh "target/release/${{ matrix.bin }}" dist
+            ditto -c -k --keepParent dist/FableTime.app "dist/${{ matrix.asset }}"
+            rm -rf dist/FableTime.app
+          else
+            cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+          fi
 
       - name: Upload artifact
         id: upload

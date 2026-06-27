@@ -96,11 +96,19 @@ Choosing a period + formats and clicking **Export** writes the selected formats 
 Pushing a `v*` tag also **publishes a GitHub Release** with all three binaries attached. See
 [CHANGELOG.md](CHANGELOG.md).
 
+The macOS download is a `FableTime.app` bundle (zipped) — unzip and drag it to Applications. The
+Windows and Linux downloads are bare executables.
+
 ### Windows SmartScreen
 
 The Windows binary isn't code-signed yet, so on first run SmartScreen shows an "unrecognized app"
 prompt — click **More info → Run anyway**. Code signing (via SignPath, free for OSS) is being set
 up to remove this; the CI workflow already has the signing step, gated until it's configured.
+
+### macOS Gatekeeper
+
+The app isn't notarized yet, so the first launch is blocked as from an "unidentified developer" —
+**right-click the app → Open → Open**, or allow it under System Settings → Privacy & Security.
 
 ## Project layout
 

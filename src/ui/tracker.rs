@@ -1,13 +1,13 @@
 //! Tracker tab: a work bar (description + project + clock + Start/Stop) and a
 //! list of today's entries with a running highlight and per-entry replay.
 
-use chrono::{Local, Utc};
+use chrono::{Local, NaiveDate, Utc};
 use gpui::{div, prelude::*, px, rgb, Context, Entity, Window};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
 
 use crate::app::AppState;
-use crate::models::{format_dur_ru, format_hms, local_hm, Id};
+use crate::models::{format_dur_ru, format_hms, local_hm, local_hm_to_utc, parse_hm, Id};
 use crate::palette;
 use crate::ui::common::dot;
 
@@ -16,6 +16,13 @@ pub struct TrackerView {
     desc: Entity<InputState>,
     draft_project: Option<Id>,
     picker_open: bool,
+    // Inline edit of a finished entry in today's list.
+    edit_id: Option<Id>,
+    edit_pid: Id,
+    edit_date: NaiveDate,
+    edit_desc: Entity<InputState>,
+    edit_start: Entity<InputState>,
+    edit_end: Entity<InputState>,
 }
 
 impl TrackerView {
@@ -32,13 +39,176 @@ impl TrackerView {
             }
         })
         .detach();
+        let edit_desc = cx.new(|cx| InputState::new(window, cx).placeholder("На чём работали?"));
+        let edit_start = cx.new(|cx| InputState::new(window, cx).placeholder("09:00"));
+        let edit_end = cx.new(|cx| InputState::new(window, cx).placeholder("10:30"));
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
         Self {
             app,
             desc,
             draft_project: None,
             picker_open: false,
+            edit_id: None,
+            edit_pid: 0,
+            edit_date: Local::now().date_naive(),
+            edit_desc,
+            edit_start,
+            edit_end,
         }
+    }
+
+    /// Enter inline-edit for a finished entry: populate the edit inputs.
+    fn begin_edit(
+        &mut self,
+        id: Id,
+        pid: Id,
+        date: NaiveDate,
+        desc: String,
+        start_hm: String,
+        end_hm: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_id = Some(id);
+        self.edit_pid = pid;
+        self.edit_date = date;
+        self.edit_desc.update(cx, |s, cx| s.set_value(desc, window, cx));
+        self.edit_start.update(cx, |s, cx| s.set_value(start_hm, window, cx));
+        self.edit_end.update(cx, |s, cx| s.set_value(end_hm, window, cx));
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_id = None;
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.edit_id else { return };
+        let (Some((sh, sm)), Some((eh, em))) = (
+            parse_hm(&self.edit_start.read(cx).value()),
+            parse_hm(&self.edit_end.read(cx).value()),
+        ) else {
+            return;
+        };
+        let (Some(start), Some(end)) = (
+            local_hm_to_utc(self.edit_date, sh, sm),
+            local_hm_to_utc(self.edit_date, eh, em),
+        ) else {
+            return;
+        };
+        let desc = self.edit_desc.read(cx).value().to_string();
+        let desc = desc.trim();
+        let desc_opt = (!desc.is_empty()).then_some(desc);
+        let pid = self.edit_pid;
+        self.app.update(cx, |s, _| {
+            if let Err(e) = s.db.update_entry(id, pid, start, Some(end), desc_opt) {
+                eprintln!("update_entry: {e:#}");
+            }
+        });
+        self.edit_id = None;
+        cx.notify();
+    }
+
+    fn delete_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.edit_id {
+            self.app.update(cx, |s, _| {
+                if let Err(e) = s.db.delete_entry(id) {
+                    eprintln!("delete_entry: {e:#}");
+                }
+            });
+        }
+        self.edit_id = None;
+        cx.notify();
+    }
+
+    /// The inline edit form rendered in place of a row being edited.
+    fn edit_row(
+        &self,
+        projects: &[crate::models::Project],
+        proj_ids: &[Id],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let ep = projects
+            .iter()
+            .find(|p| p.id == self.edit_pid)
+            .or_else(|| projects.first());
+        let ename = ep.map(|p| p.name.clone()).unwrap_or_else(|| "—".into());
+        let ecolor = ep.map(|p| palette::hex_to_u32(&p.color)).unwrap_or(palette::MUTED);
+        let ids = proj_ids.to_vec();
+
+        let chip = h_flex()
+            .id("edit-proj")
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_1()
+            .border_color(rgb(palette::BORDER))
+            .rounded(px(9.))
+            .cursor_pointer()
+            .bg(rgb(0xfcfcfd))
+            .text_size(px(13.))
+            .font_medium()
+            .text_color(rgb(0x3f3f46))
+            .child(dot(ecolor, 8.))
+            .child(div().child(ename))
+            .child(Icon::new(IconName::ChevronDown).xsmall().text_color(rgb(palette::MUTED)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if ids.is_empty() {
+                    return;
+                }
+                let idx = ids.iter().position(|x| *x == this.edit_pid).unwrap_or(0);
+                this.edit_pid = ids[(idx + 1) % ids.len()];
+                cx.notify();
+            }));
+
+        let buttons = h_flex()
+            .gap(px(6.))
+            .child(
+                div()
+                    .id("edit-save")
+                    .flex().items_center().gap(px(6.)).px(px(14.)).h(px(38.)).rounded(px(9.))
+                    .cursor_pointer()
+                    .bg(rgb(palette::ACCENT)).text_color(rgb(0xffffff)).text_size(px(13.)).font_semibold()
+                    .child(Icon::new(IconName::Check).xsmall().text_color(rgb(0xffffff)))
+                    .child(div().child("Сохранить"))
+                    .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
+            )
+            .child(
+                div()
+                    .id("edit-del")
+                    .flex().items_center().justify_center().w(px(38.)).h(px(38.)).rounded(px(9.))
+                    .cursor_pointer()
+                    .bg(rgb(palette::DANGER)).text_color(rgb(0xffffff))
+                    .child(Icon::new(IconName::Delete).xsmall().text_color(rgb(0xffffff)))
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_edit(cx))),
+            )
+            .child(
+                div()
+                    .id("edit-cancel")
+                    .flex().items_center().px(px(12.)).h(px(38.)).rounded(px(9.))
+                    .cursor_pointer()
+                    .text_color(rgb(palette::LABEL)).text_size(px(13.)).font_medium()
+                    .child("Отмена")
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx))),
+            );
+
+        h_flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(rgb(palette::HAIRLINE_2))
+            .bg(rgb(0xfafaff))
+            .child(chip)
+            .child(div().flex_1().min_w(px(140.)).child(Input::new(&self.edit_desc)))
+            .child(div().w(px(72.)).child(Input::new(&self.edit_start)))
+            .child(div().text_color(rgb(palette::MUTED)).child("–"))
+            .child(div().w(px(72.)).child(Input::new(&self.edit_end)))
+            .child(buttons)
     }
 
     fn start_or_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -233,17 +403,27 @@ impl Render for TrackerView {
         });
 
         let run_id = running.as_ref().map(|r| r.0);
+        let proj_ids: Vec<Id> = projects.iter().map(|p| p.id).collect();
         let rows = entries
             .iter()
             .filter(|e| Some(e.entry.id) != run_id)
             .map(|e| {
+                let id = e.entry.id;
+                if self.edit_id == Some(id) {
+                    return self.edit_row(&projects, &proj_ids, cx);
+                }
                 let pid = e.project_id;
+                let raw_desc = e.entry.description.clone().unwrap_or_default();
                 let desc = e.entry.desc_or("Без названия");
                 let project = e.project.clone();
                 let color = palette::hex_to_u32(&e.color);
-                let range = format!("{} – {}", local_hm(e.entry.start()), e.entry.end().map(local_hm).unwrap_or_default());
+                let start_hm = local_hm(e.entry.start());
+                let end_hm = e.entry.end().map(local_hm).unwrap_or_default();
+                let range = format!("{start_hm} – {end_hm}");
                 let dur = format_dur_ru(e.entry.duration_secs(Utc::now()));
                 let replay_desc = desc.clone();
+                let date = e.entry.local_date();
+                let (s_hm, e_hm, ed_desc) = (start_hm.clone(), end_hm.clone(), raw_desc.clone());
                 h_flex()
                     .items_center()
                     .gap(px(14.))
@@ -253,14 +433,23 @@ impl Render for TrackerView {
                     .border_color(rgb(palette::HAIRLINE_2))
                     .child(dot(color, 9.))
                     .child(
-                        v_flex().flex_1().min_w(px(0.))
-                            .child(div().text_size(px(14.)).font_medium().child(desc))
-                            .child(div().text_size(px(12.)).text_color(rgb(palette::TEXT_3)).child(format!("{project} · {range}"))),
+                        div()
+                            .id(("edit-row", id as usize))
+                            .flex().flex_1().min_w(px(0.))
+                            .cursor_pointer()
+                            .child(
+                                v_flex().flex_1().min_w(px(0.))
+                                    .child(div().text_size(px(14.)).font_medium().child(desc))
+                                    .child(div().text_size(px(12.)).text_color(rgb(palette::TEXT_3)).child(format!("{project} · {range}"))),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_edit(id, pid, date, ed_desc.clone(), s_hm.clone(), e_hm.clone(), window, cx);
+                            })),
                     )
                     .child(div().text_size(px(14.)).font_semibold().text_color(rgb(0x27272a)).child(dur))
                     .child(
                         div()
-                            .id(("replay", e.entry.id as usize))
+                            .id(("replay", id as usize))
                             .w(px(30.)).h(px(30.))
                             .flex().items_center().justify_center()
                             .rounded(px(8.))

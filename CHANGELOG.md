@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.2] — 2026-06-27
+
+### Added
+- Tracker: edit a finished entry inline — description, start/end time, and project —
+  with save / delete / cancel right in today's list.
+- A reusable project picker dropdown (a chip that opens a list directly beneath it),
+  used in both the Tracker editor and the Calendar form.
+- An application icon. On macOS the app now ships as a `FableTime.app` bundle so it
+  has a proper Dock/Finder icon; Windows embeds the icon in the executable.
+
+### Infrastructure
+- Windows code-signing step (SignPath, free for OSS) wired into CI, gated until the
+  signing credentials are configured.
+
 ## [0.1.1] — 2026-06-25
 
 ### Fixed
@@ -35,5 +49,6 @@ local SQLite storage, styled to match the approved Time Tracker design.
 - Prebuilt binaries for Windows, macOS and Linux are attached to this release (built
   by CI). Building on macOS needs the Xcode Metal toolchain — see the README.
 
+[0.1.2]: https://github.com/konnectr/FableTime/releases/tag/v0.1.2
 [0.1.1]: https://github.com/konnectr/FableTime/releases/tag/v0.1.1
 [0.1.0]: https://github.com/konnectr/FableTime/releases/tag/v0.1.0

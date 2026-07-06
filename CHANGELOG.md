@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0] — 2026-07-06
+
+### Added
+- **Notes.** Every time entry now carries a free-text detail note (what you actually
+  did — details, links, results) separate from its short description, edited inline via
+  a note button on the running row and on each of today's entries. Every project has a
+  note too (repo, access, rate…), edited in its card, with clickable URLs shown with a
+  github / external-link icon.
+- **Lucide icons.** The app vendors its own Lucide SVGs and serves them through a
+  composite asset source, so the UI is no longer limited to gpui-component's bundled
+  subset. Refreshed nav and note glyphs (clock, layers, download, file-text, pencil).
+
+### Changed
+- Database migrated to **v3**: nullable `note` columns on `time_entries` and `projects`
+  (existing data is preserved).
+
 ## [0.1.2] — 2026-06-27
 
 ### Added

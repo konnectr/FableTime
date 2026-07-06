@@ -7,6 +7,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
 
 use crate::app::AppState;
+use crate::icons::Lucide;
 use crate::models::{format_dur_ru, format_hms, local_hm, local_hm_to_utc, parse_hm, Id};
 use crate::palette;
 use crate::ui::common::dot;
@@ -24,6 +25,11 @@ pub struct TrackerView {
     edit_desc: Entity<InputState>,
     edit_start: Entity<InputState>,
     edit_end: Entity<InputState>,
+    // Inline note editor: one shared multi-line input, routed to whichever entry
+    // (or the running row) is currently open.
+    note_open_id: Option<Id>,
+    run_note_open: bool,
+    note_input: Entity<InputState>,
 }
 
 impl TrackerView {
@@ -43,6 +49,29 @@ impl TrackerView {
         let edit_desc = cx.new(|cx| InputState::new(window, cx).placeholder("На чём работали?"));
         let edit_start = cx.new(|cx| InputState::new(window, cx).placeholder("09:00"));
         let edit_end = cx.new(|cx| InputState::new(window, cx).placeholder("10:30"));
+        let note_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(3, 10)
+                .placeholder("Что именно делали? Детали, ссылки, результат…")
+        });
+        // Editing the note live-saves to whichever target is currently open.
+        cx.subscribe(&note_input, |this, inp, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let text = inp.read(cx).value().to_string();
+                if this.run_note_open {
+                    this.app.update(cx, |st, cx| st.set_running_note(&text, cx));
+                } else if let Some(id) = this.note_open_id {
+                    this.app.update(cx, |st, _| {
+                        if let Err(e) = st.db.set_entry_note(id, Some(&text)) {
+                            eprintln!("set_entry_note: {e:#}");
+                        }
+                    });
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
         Self {
             app,
@@ -56,7 +85,34 @@ impl TrackerView {
             edit_desc,
             edit_start,
             edit_end,
+            note_open_id: None,
+            run_note_open: false,
+            note_input,
         }
+    }
+
+    /// Toggle the note editor for a finished entry (closing any other open one).
+    fn toggle_entry_note(&mut self, id: Id, note: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_open_id == Some(id) {
+            self.note_open_id = None;
+        } else {
+            self.note_open_id = Some(id);
+            self.run_note_open = false;
+            self.note_input.update(cx, |s, cx| s.set_value(note, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Toggle the note editor for the running entry.
+    fn toggle_run_note(&mut self, note: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_note_open {
+            self.run_note_open = false;
+        } else {
+            self.run_note_open = true;
+            self.note_open_id = None;
+            self.note_input.update(cx, |s, cx| s.set_value(note, window, cx));
+        }
+        cx.notify();
     }
 
     /// Enter inline-edit for a finished entry: populate the edit inputs.
@@ -240,6 +296,7 @@ impl Render for TrackerView {
                 r.project.clone(),
                 palette::hex_to_u32(&r.color),
                 r.start,
+                r.note.clone(),
             )
         });
         let projects = app.db.list_projects().unwrap_or_default();
@@ -365,38 +422,99 @@ impl Render for TrackerView {
         });
 
         // --- today's entries -------------------------------------------------
-        let run_row = running.as_ref().map(|(_, desc, project, color, start)| {
+        let run_note_open = self.run_note_open;
+        let run_row = running.as_ref().map(|(_, desc, project, color, start, note)| {
             let secs = (Utc::now() - *start).num_seconds().max(0);
-            h_flex()
+            let color = *color;
+            let has_note = !note.trim().is_empty();
+            let note_active = has_note || run_note_open;
+            let note_for_toggle = note.clone();
+
+            let mut text_col = v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_medium()
+                        .child(if desc.is_empty() { "Без названия".to_string() } else { desc.clone() }),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(palette::TEXT_3))
+                        .child(format!("{project} · идёт сейчас")),
+                );
+            if has_note && !run_note_open {
+                let preview = note.clone();
+                text_col = text_col.child(
+                    div()
+                        .id("run-note-prev")
+                        .flex()
+                        .gap(px(6.))
+                        .mt(px(6.))
+                        .cursor_pointer()
+                        .child(Icon::new(Lucide::FileText).xsmall().text_color(rgb(palette::FAINT)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(rgb(palette::NOTE_TEXT))
+                                .child(preview),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toggle_run_note(note_for_toggle.clone(), window, cx);
+                        })),
+                );
+            }
+
+            let note_for_btn = note.clone();
+            let main = h_flex()
                 .items_center()
                 .gap(px(14.))
                 .px(px(18.))
                 .py(px(15.))
-                .border_b_1()
-                .border_color(rgb(palette::HAIRLINE))
-                .bg(rgb(0xfafaff))
-                .child(dot(*color, 9.))
-                .child(
-                    v_flex().flex_1().min_w(px(0.)).child(
-                        div()
-                            .text_size(px(14.))
-                            .font_medium()
-                            .child(if desc.is_empty() { "Без названия".to_string() } else { desc.clone() }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(palette::TEXT_3))
-                            .child(format!("{project} · идёт сейчас")),
-                    ),
-                )
+                .child(dot(color, 9.))
+                .child(text_col)
                 .child(
                     div()
                         .text_size(px(14.))
                         .font_semibold()
-                        .text_color(rgb(*color))
+                        .text_color(rgb(color))
                         .child(format_hms(secs)),
                 )
+                .child(
+                    div()
+                        .id("run-note-btn")
+                        .w(px(30.)).h(px(30.))
+                        .flex().items_center().justify_center()
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .text_color(rgb(if note_active { palette::ACCENT } else { palette::NOTE_IDLE }))
+                        .hover(|s| s.bg(rgb(palette::HOVER_2)))
+                        .child(Icon::new(Lucide::FileText).small())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toggle_run_note(note_for_btn.clone(), window, cx);
+                        })),
+                );
+
+            let mut row = v_flex()
+                .border_b_1()
+                .border_color(rgb(palette::HAIRLINE))
+                .bg(rgb(palette::RUN_ROW))
+                .child(main);
+            if run_note_open {
+                row = row.child(
+                    div()
+                        .px(px(18.))
+                        .pb(px(14.))
+                        .pl(px(41.))
+                        .child(Input::new(&self.note_input)),
+                );
+            }
+            row
         });
 
         let run_id = running.as_ref().map(|r| r.0);
@@ -420,29 +538,67 @@ impl Render for TrackerView {
                 let replay_desc = desc.clone();
                 let date = e.entry.local_date();
                 let (s_hm, e_hm, ed_desc) = (start_hm.clone(), end_hm.clone(), raw_desc.clone());
-                h_flex()
+                let note = e.entry.note.clone().unwrap_or_default();
+                let has_note = e.entry.note_text().is_some();
+                let note_open = self.note_open_id == Some(id);
+                let note_active = has_note || note_open;
+
+                let mut text_col = v_flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .id(("edit-row", id as usize))
+                            .flex().flex_col().min_w(px(0.))
+                            .cursor_pointer()
+                            .child(div().text_size(px(14.)).font_medium().child(desc))
+                            .child(div().text_size(px(12.)).text_color(rgb(palette::TEXT_3)).child(format!("{project} · {range}")))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_edit(id, pid, date, ed_desc.clone(), s_hm.clone(), e_hm.clone(), window, cx);
+                            })),
+                    );
+                if has_note && !note_open {
+                    let preview = note.clone();
+                    let note_for_prev = note.clone();
+                    text_col = text_col.child(
+                        div()
+                            .id(("note-prev", id as usize))
+                            .flex().gap(px(6.)).mt(px(6.))
+                            .cursor_pointer()
+                            .child(Icon::new(Lucide::FileText).xsmall().text_color(rgb(palette::FAINT)))
+                            .child(
+                                div().flex_1().min_w(px(0.)).truncate()
+                                    .text_size(px(12.5)).text_color(rgb(palette::NOTE_TEXT)).child(preview),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_entry_note(id, note_for_prev.clone(), window, cx);
+                            })),
+                    );
+                }
+
+                let note_for_btn = note.clone();
+                let main = h_flex()
                     .items_center()
                     .gap(px(14.))
                     .px(px(18.))
                     .py(px(14.))
-                    .border_b_1()
-                    .border_color(rgb(palette::HAIRLINE_2))
                     .child(dot(color, 9.))
+                    .child(text_col)
+                    .child(div().text_size(px(14.)).font_semibold().text_color(rgb(0x27272a)).child(dur))
                     .child(
                         div()
-                            .id(("edit-row", id as usize))
-                            .flex().flex_1().min_w(px(0.))
+                            .id(("note-btn", id as usize))
+                            .w(px(30.)).h(px(30.))
+                            .flex().items_center().justify_center()
+                            .rounded(px(8.))
                             .cursor_pointer()
-                            .child(
-                                v_flex().flex_1().min_w(px(0.))
-                                    .child(div().text_size(px(14.)).font_medium().child(desc))
-                                    .child(div().text_size(px(12.)).text_color(rgb(palette::TEXT_3)).child(format!("{project} · {range}"))),
-                            )
+                            .text_color(rgb(if note_active { palette::ACCENT } else { palette::NOTE_IDLE }))
+                            .hover(|s| s.bg(rgb(palette::HOVER_2)))
+                            .child(Icon::new(Lucide::FileText).small())
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_edit(id, pid, date, ed_desc.clone(), s_hm.clone(), e_hm.clone(), window, cx);
+                                this.toggle_entry_note(id, note_for_btn.clone(), window, cx);
                             })),
                     )
-                    .child(div().text_size(px(14.)).font_semibold().text_color(rgb(0x27272a)).child(dur))
                     .child(
                         div()
                             .id(("replay", id as usize))
@@ -451,11 +607,27 @@ impl Render for TrackerView {
                             .rounded(px(8.))
                             .cursor_pointer()
                             .text_color(rgb(palette::MUTED))
+                            .hover(|s| s.bg(rgb(palette::HOVER_2)))
                             .child(Icon::new(IconName::Play).xsmall())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.app.update(cx, |s, cx| s.start(pid, &replay_desc, cx));
                             })),
-                    )
+                    );
+
+                let mut row = v_flex()
+                    .border_b_1()
+                    .border_color(rgb(palette::HAIRLINE_2))
+                    .child(main);
+                if note_open {
+                    row = row.child(
+                        div()
+                            .px(px(18.))
+                            .pb(px(14.))
+                            .pl(px(41.))
+                            .child(Input::new(&self.note_input)),
+                    );
+                }
+                row
             })
             .collect::<Vec<_>>();
 

@@ -18,6 +18,7 @@ pub struct RunningInfo {
     pub project: String,
     pub color: String, // "#rrggbb"
     pub description: String,
+    pub note: String,
     pub start: DateTime<Utc>,
 }
 
@@ -44,6 +45,7 @@ impl AppState {
                     project,
                     color,
                     description: entry.description.clone().unwrap_or_default(),
+                    note: entry.note.clone().unwrap_or_default(),
                     start: entry.start(),
                 });
                 state.start_tick(cx);
@@ -67,6 +69,7 @@ impl AppState {
                     project,
                     color,
                     description: description.trim().to_string(),
+                    note: String::new(),
                     start: Utc::now(),
                 });
                 self.start_tick(cx);
@@ -97,6 +100,15 @@ impl AppState {
                 None,
                 (!d.is_empty()).then_some(d),
             );
+            cx.notify();
+        }
+    }
+
+    /// Live-edit the running entry's detail note (kept in DB + snapshot).
+    pub fn set_running_note(&mut self, note: &str, cx: &mut Context<Self>) {
+        if let Some(r) = self.running.as_mut() {
+            r.note = note.to_string();
+            let _ = self.db.set_entry_note(r.entry_id, Some(note));
             cx.notify();
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "timetracker"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Cross-platform time tracker (GPUI)"
 
@@ -32,6 +32,10 @@ serde_json = "1"
 
 # Errors
 anyhow = "1"
+
+# Embed our own Lucide icon SVGs (assets/icons) into the binary — served through
+# a composite AssetSource alongside gpui-component's bundle (see src/assets.rs).
+rust-embed = "8"
 
 # Embed the app icon into the Windows .exe (Windows host only).
 [target.'cfg(windows)'.build-dependencies]

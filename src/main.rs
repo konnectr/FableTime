@@ -6,20 +6,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod assets;
 mod db;
 mod exporter;
+mod icons;
 mod models;
 mod palette;
 mod ui;
 
+use crate::assets::AppAssets;
 use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
-use gpui_component_assets::Assets;
 
 fn main() {
     // Bootstrap pattern from gpui-component's story/main.rs + getting-started:
     // configure assets, init components, then open a window whose root view is
     // wrapped in gpui_component::Root.
-    let application = gpui_platform::application().with_assets(Assets);
+    let application = gpui_platform::application().with_assets(AppAssets);
 
     application.run(|cx: &mut App| {
         gpui_component::init(cx);

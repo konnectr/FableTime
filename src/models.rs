@@ -17,6 +17,7 @@ pub struct Project {
     pub name: String,
     pub client: Option<String>,
     pub color: String, // "#rrggbb"
+    pub note: Option<String>, // free-text project note (links, rate, access…)
     pub archived: bool,
     pub created_at: String,
 }
@@ -29,6 +30,7 @@ pub struct TimeEntry {
     pub id: Id,
     pub project_id: Id,
     pub description: Option<String>,
+    pub note: Option<String>, // free-text detail note, separate from the short description
     pub start_ts: String,
     pub end_ts: Option<String>,
     pub created_at: String,
@@ -58,6 +60,10 @@ impl TimeEntry {
             _ => fallback.to_string(),
         }
     }
+    /// The note, trimmed, only if non-empty.
+    pub fn note_text(&self) -> Option<&str> {
+        self.note.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
 }
 
 /// One flattened, display-ready row for CSV / JSON / Markdown export.
@@ -70,6 +76,58 @@ pub struct ExportRow {
     pub end: String,         // local HH:MM, or "" if running
     pub duration_secs: i64,
     pub duration_hms: String,
+}
+
+// --- note link segmentation -------------------------------------------------
+
+/// A piece of a note: either plain text or a clickable URL.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Segment {
+    Text(String),
+    Link { href: String, text: String },
+}
+
+/// Split free text into plain/link segments on `http(s)://…` runs, stripping any
+/// trailing `),.;` punctuation off a URL back into the following text. Link
+/// display text drops the scheme.
+pub fn link_segments(text: &str) -> Vec<Segment> {
+    let mut segs = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut text_start = 0;
+    while i < bytes.len() {
+        let rest = &text[i..];
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            if i > text_start {
+                segs.push(Segment::Text(text[text_start..i].to_string()));
+            }
+            // Extend to the next whitespace.
+            let mut end = i;
+            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            // Peel trailing punctuation back into the following text.
+            let mut url_end = end;
+            while url_end > i && matches!(bytes[url_end - 1], b')' | b',' | b'.' | b';') {
+                url_end -= 1;
+            }
+            let url = &text[i..url_end];
+            let display = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+                .unwrap_or(url);
+            segs.push(Segment::Link { href: url.to_string(), text: display.to_string() });
+            i = url_end;
+            text_start = url_end;
+        } else {
+            // Advance one full char (stay on UTF-8 boundaries).
+            i += rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+    }
+    if text_start < text.len() {
+        segs.push(Segment::Text(text[text_start..].to_string()));
+    }
+    segs
 }
 
 // --- time helpers -----------------------------------------------------------
@@ -158,4 +216,43 @@ pub fn local_minutes(ts: DateTime<Utc>) -> i64 {
     use chrono::Timelike;
     let d = ts.with_timezone(&Local);
     d.hour() as i64 * 60 + d.minute() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(href: &str, text: &str) -> Segment {
+        Segment::Link { href: href.into(), text: text.into() }
+    }
+
+    #[test]
+    fn link_segments_splits_urls() {
+        assert_eq!(
+            link_segments("see https://github.com/acme/x next"),
+            vec![
+                Segment::Text("see ".into()),
+                link("https://github.com/acme/x", "github.com/acme/x"),
+                Segment::Text(" next".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn link_segments_peels_trailing_punctuation() {
+        assert_eq!(
+            link_segments("repo (https://a.io/p), done."),
+            vec![
+                Segment::Text("repo (".into()),
+                link("https://a.io/p", "a.io/p"),
+                Segment::Text("), done.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn link_segments_plain_text_is_one_segment() {
+        assert_eq!(link_segments("just text"), vec![Segment::Text("just text".into())]);
+        assert_eq!(link_segments(""), vec![]);
+    }
 }

@@ -17,6 +17,11 @@ pub const BORDER_2: u32 = 0xf0f0f2;
 pub const HAIRLINE: u32 = 0xf3f3f5;
 pub const HAIRLINE_2: u32 = 0xf5f5f7;
 pub const HOVER: u32 = 0xf7f7f9;
+pub const HOVER_2: u32 = 0xf4f4f6; // note-button hover
+pub const RUN_ROW: u32 = 0xfafaff; // running-entry row background
+pub const NOTE_TEXT: u32 = 0x6b6b73; // note preview / body text
+pub const NOTE_IDLE: u32 = 0xc4c4cb; // note icon when empty
+pub const FIELD_BORDER: u32 = 0xe4e4ea; // note textarea border
 
 // --- accents ----------------------------------------------------------------
 pub const ACCENT: u32 = 0x4f46e5; // indigo-600

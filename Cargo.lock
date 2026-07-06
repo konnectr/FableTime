@@ -6464,7 +6464,7 @@ dependencies = [
 
 [[package]]
 name = "timetracker"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6476,6 +6476,7 @@ dependencies = [
  "gpui_platform",
  "rfd",
  "rusqlite",
+ "rust-embed",
  "serde",
  "serde_json",
  "winresource",

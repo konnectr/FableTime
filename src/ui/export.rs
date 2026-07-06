@@ -3,10 +3,11 @@
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui::{div, prelude::*, px, rgb, Context, Entity, SharedString, Window};
-use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
+use gpui_component::{h_flex, v_flex, Icon, Sizable, StyledExt};
 
 use crate::app::AppState;
 use crate::exporter::write_exports;
+use crate::icons::Lucide;
 use crate::models::{format_dur_ru, Id};
 use crate::palette;
 
@@ -298,7 +299,7 @@ impl Render for ExportView {
                     .text_color(rgb(0xffffff))
                     .text_size(px(14.))
                     .font_semibold()
-                    .child(Icon::new(IconName::ArrowDown).xsmall().text_color(rgb(0xffffff)))
+                    .child(Icon::new(Lucide::Download).xsmall().text_color(rgb(0xffffff)))
                     .child(div().child("Экспортировать"))
                     .on_click(cx.listener(|this, _, _, cx| this.do_export(cx))),
             );

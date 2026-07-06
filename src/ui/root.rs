@@ -5,6 +5,7 @@ use gpui::{div, prelude::*, px, rgb, Context, Entity, Window};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
 
 use crate::app::AppState;
+use crate::icons::Lucide;
 use crate::models::format_dur_ru;
 use crate::palette;
 use crate::ui::calendar::CalendarView;
@@ -58,7 +59,7 @@ impl RootView {
     fn nav_item(
         &self,
         tab: Tab,
-        icon: IconName,
+        icon: impl Into<Icon>,
         label: &'static str,
         id: &'static str,
         cx: &mut Context<Self>,
@@ -138,10 +139,10 @@ impl RootView {
             .child(
                 v_flex()
                     .gap(px(3.))
-                    .child(self.nav_item(Tab::Tracker, IconName::LayoutDashboard, "Трекер", "nav-tracker", cx))
+                    .child(self.nav_item(Tab::Tracker, Lucide::Clock, "Трекер", "nav-tracker", cx))
                     .child(self.nav_item(Tab::Calendar, IconName::Calendar, "Календарь", "nav-calendar", cx))
-                    .child(self.nav_item(Tab::Projects, IconName::FolderClosed, "Проекты", "nav-projects", cx))
-                    .child(self.nav_item(Tab::Export, IconName::ArrowDown, "Экспорт", "nav-export", cx)),
+                    .child(self.nav_item(Tab::Projects, Lucide::Layers, "Проекты", "nav-projects", cx))
+                    .child(self.nav_item(Tab::Export, Lucide::Download, "Экспорт", "nav-export", cx)),
             )
             .child(div().flex_1())
             .child(card)

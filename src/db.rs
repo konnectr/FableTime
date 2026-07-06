@@ -55,6 +55,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_entries_start   ON time_entries(start_ts);
     CREATE INDEX idx_entries_project ON time_entries(project_id);
     "#,
+    // v3 — a free-text detail note on entries, and a note on projects.
+    r#"
+    ALTER TABLE time_entries ADD COLUMN note TEXT;
+    ALTER TABLE projects     ADD COLUMN note TEXT;
+    "#,
 ];
 
 /// A time entry joined with its project name + color — for list/detail views.
@@ -119,7 +124,7 @@ impl Db {
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, client, color, archived, created_at
+            "SELECT id, name, client, color, note, archived, created_at
              FROM projects WHERE archived = 0 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], row_to_project)?;
@@ -129,6 +134,14 @@ impl Db {
     pub fn archive_project(&self, id: Id) -> Result<()> {
         self.conn
             .execute("UPDATE projects SET archived = 1 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Set (or clear) a project's note. Blank/whitespace stores NULL.
+    pub fn set_project_note(&self, id: Id, note: Option<&str>) -> Result<()> {
+        let n = note.map(str::trim).filter(|s| !s.is_empty());
+        self.conn
+            .execute("UPDATE projects SET note = ?2 WHERE id = ?1", params![id, n])?;
         Ok(())
     }
 
@@ -171,7 +184,7 @@ impl Db {
     pub fn running_entry(&self) -> Result<Option<TimeEntry>> {
         self.conn
             .query_row(
-                "SELECT id, project_id, description, start_ts, end_ts, created_at
+                "SELECT id, project_id, description, note, start_ts, end_ts, created_at
                  FROM time_entries WHERE end_ts IS NULL ORDER BY start_ts DESC LIMIT 1",
                 [],
                 row_to_entry,
@@ -217,9 +230,18 @@ impl Db {
         Ok(())
     }
 
+    /// Set (or clear) an entry's detail note. Blank/whitespace stores NULL so
+    /// "has a note" is a plain `note IS NOT NULL` check.
+    pub fn set_entry_note(&self, id: Id, note: Option<&str>) -> Result<()> {
+        let n = note.map(str::trim).filter(|s| !s.is_empty());
+        self.conn
+            .execute("UPDATE time_entries SET note = ?2 WHERE id = ?1", params![id, n])?;
+        Ok(())
+    }
+
     fn entries_between(&self, lo: &str, hi: &str) -> Result<Vec<EntryDetail>> {
         let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.project_id, e.description, e.start_ts, e.end_ts, e.created_at,
+            "SELECT e.id, e.project_id, e.description, e.note, e.start_ts, e.end_ts, e.created_at,
                     p.name AS project, p.color AS color
              FROM time_entries e JOIN projects p ON p.id = e.project_id
              WHERE e.start_ts >= ?1 AND e.start_ts < ?2
@@ -331,6 +353,7 @@ fn row_to_project(r: &Row) -> rusqlite::Result<Project> {
         name: r.get("name")?,
         client: r.get("client")?,
         color: r.get::<_, Option<String>>("color")?.unwrap_or_else(|| "#4f46e5".into()),
+        note: r.get("note")?,
         archived: r.get::<_, i64>("archived")? != 0,
         created_at: r.get("created_at")?,
     })
@@ -341,8 +364,57 @@ fn row_to_entry(r: &Row) -> rusqlite::Result<TimeEntry> {
         id: r.get("id")?,
         project_id: r.get("project_id")?,
         description: r.get("description")?,
+        note: r.get("note")?,
         start_ts: r.get("start_ts")?,
         end_ts: r.get("end_ts")?,
         created_at: r.get("created_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn migration_reaches_v3() {
+        let db = Db::open_in_memory().unwrap();
+        let v: i64 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, 3);
+    }
+
+    #[test]
+    fn project_note_roundtrips_and_blanks_to_null() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", Some("Acme")).unwrap();
+        let get = |db: &Db| db.list_projects().unwrap().into_iter().find(|p| p.id == pid).unwrap().note;
+
+        assert_eq!(get(&db), None);
+        db.set_project_note(pid, Some("  https://x.io  ")).unwrap();
+        assert_eq!(get(&db).as_deref(), Some("https://x.io")); // trimmed
+        db.set_project_note(pid, Some("   ")).unwrap();
+        assert_eq!(get(&db), None); // blank -> NULL
+    }
+
+    #[test]
+    fn entry_note_survives_running_stop_and_time_edit() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        let eid = db.start_entry(pid, "desc").unwrap();
+
+        db.set_entry_note(eid, Some("what I did")).unwrap();
+        assert_eq!(db.running_entry().unwrap().unwrap().note.as_deref(), Some("what I did"));
+
+        db.stop_running().unwrap();
+        // Editing time/description via update_entry must NOT clobber the note.
+        let start = Utc::now();
+        db.update_entry(eid, pid, start, Some(start + Duration::minutes(5)), Some("newdesc"))
+            .unwrap();
+
+        let list = db.entries_between("1970-01-01T00:00:00Z", "2999-01-01T00:00:00Z").unwrap();
+        let e = list.iter().find(|e| e.entry.id == eid).unwrap();
+        assert_eq!(e.entry.note.as_deref(), Some("what I did"));
+        assert_eq!(e.entry.description.as_deref(), Some("newdesc"));
+    }
 }

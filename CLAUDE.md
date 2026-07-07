@@ -35,6 +35,21 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo build --release
 Linux/Windows need no `DEVELOPER_DIR`. Linux needs graphics/font dev packages — see
 `.github/workflows/build.yml`.
 
+## Releasing
+
+Version bumps go through **`cargo-release`** (config in `release.toml`; one-time
+`cargo install cargo-release`). Commits follow **Conventional Commits** (`feat:`, `fix:`,
+`refactor:`, `release:`).
+
+1. Write the human-curated notes for the release under `## [Unreleased]` in `CHANGELOG.md`.
+2. `cargo release patch` (or `minor` / `major`) — bumps `Cargo.toml`, moves the
+   `Unreleased` heading down under the new `X.Y.Z — DATE`, fixes the bottom links, commits
+   `release: vX.Y.Z`, tags `vX.Y.Z`, and pushes.
+3. CI (`build.yml`, trigger `tags: ["v*"]`) builds the binaries and publishes the GitHub
+   Release.
+
+Dry-run first with `cargo release patch` (no `--execute` = it only prints the plan).
+
 **Test overrides (env):** `TIMETRACKER_DB=<path>` points at a throwaway DB (keeps the real
 one untouched); `TIMETRACKER_TAB=tracker|calendar|projects|export` sets the initial tab —
 used to smoke each render path headlessly.

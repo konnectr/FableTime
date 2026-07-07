@@ -2,7 +2,7 @@
 //! a compact form below to add / edit / delete entries.
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Utc};
-use gpui::{div, prelude::*, px, rgb, Context, Entity, Window};
+use gpui::{div, point, prelude::*, px, rgb, Context, Entity, ScrollHandle, Window};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
 
@@ -12,10 +12,15 @@ use crate::models::{
 };
 use crate::palette;
 
-const START_H: i64 = 8;
-const HOURS: i64 = 11; // 08:00 .. 18:00
+const START_H: i64 = 0;
+const HOURS: i64 = 24; // full day 00:00 .. 24:00
 const HOUR_H: f32 = 64.0;
-const TOTAL_H: f32 = HOURS as f32 * HOUR_H;
+// Grey "night" shading + open scrolled to working hours (matches the design).
+const WORK_START_H: f32 = 7.0;
+const NIGHT_TOP_H: f32 = WORK_START_H * HOUR_H; // 00:00–07:00
+const NIGHT_BOT_TOP: f32 = 21.0 * HOUR_H; // 21:00–24:00
+const NIGHT_BOT_H: f32 = 3.0 * HOUR_H;
+const NIGHT_BG: u32 = 0xf6f6f8;
 
 const WD: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
@@ -54,6 +59,8 @@ pub struct CalendarView {
     form_picker_open: bool,
     form_day: usize,
     editing_id: Option<Id>,
+    scroll: ScrollHandle,
+    did_autoscroll: bool,
 }
 
 impl CalendarView {
@@ -72,6 +79,8 @@ impl CalendarView {
             form_picker_open: false,
             form_day: Local::now().date_naive().weekday().num_days_from_monday() as usize,
             editing_id: None,
+            scroll: ScrollHandle::new(),
+            did_autoscroll: false,
         }
     }
 
@@ -129,14 +138,20 @@ impl Render for CalendarView {
 
         // group entries into per-day blocks
         let now = Utc::now();
+
+        // Full 24-hour day so nothing is ever clipped out of view; the timeline scrolls.
+        let start_h = START_H;
+        let hours = HOURS;
+        let total_h = hours as f32 * HOUR_H;
+
         let mut by_day: Vec<Vec<Block>> = (0..7).map(|_| Vec::new()).collect();
         for e in &entries {
             let d = e.entry.local_date();
             let Some(i) = week.iter().position(|x| *x == d) else { continue };
             let s = local_minutes(e.entry.start());
             let end_min = e.entry.end().map(local_minutes).unwrap_or_else(|| local_minutes(now));
-            let top = (((s - START_H * 60) as f32) / 60.0 * HOUR_H).clamp(0.0, TOTAL_H - 12.0);
-            let height = (((end_min - s) as f32) / 60.0 * HOUR_H - 3.0).clamp(20.0, TOTAL_H);
+            let top = (((s - start_h * 60) as f32) / 60.0 * HOUR_H).clamp(0.0, total_h - 12.0);
+            let height = (((end_min - s) as f32) / 60.0 * HOUR_H - 3.0).clamp(20.0, total_h);
             let pal = palette::pal_for_hex(&e.color);
             by_day[i].push(Block {
                 id: e.entry.id,
@@ -240,16 +255,16 @@ impl Render for CalendarView {
 
         // hour gutter
         let gutter = div().w(px(54.)).flex_shrink_0().border_r_1().border_color(rgb(palette::BORDER_2)).children(
-            (0..HOURS).map(|i| {
+            (0..hours).map(|i| {
                 div().h(px(HOUR_H)).flex().justify_end().pr(px(8.))
-                    .child(div().text_size(px(10.5)).text_color(rgb(palette::FAINT)).child(format!("{:02}:00", START_H + i)))
+                    .child(div().text_size(px(10.5)).text_color(rgb(palette::FAINT)).child(format!("{:02}:00", start_h + i)))
             }),
         );
 
         // day columns with blocks
         let columns = week.iter().enumerate().map(|(i, d)| {
             let is_today = *d == today;
-            let grid = div().absolute().inset_0().children((0..HOURS).map(|_| {
+            let grid = div().absolute().inset_0().children((0..hours).map(|_| {
                 div().h(px(HOUR_H)).border_b_1().border_color(rgb(palette::HAIRLINE))
             }));
             let blocks = by_day[i].iter().map(|b| {
@@ -281,19 +296,31 @@ impl Render for CalendarView {
             div()
                 .relative()
                 .flex_1()
-                .h(px(TOTAL_H))
+                .h(px(total_h))
                 .border_r_1().border_color(rgb(palette::HAIRLINE))
                 .when(is_today, |x| x.bg(rgb(0xfcfcff)))
                 .child(grid)
                 .children(blocks)
         });
 
+        // Tall day body (24h). Two grey "night" bands sit behind the columns
+        // (past the 54px gutter); the gutter+columns paint on top of them.
+        let timeline_body = div()
+            .relative()
+            .child(div().absolute().left(px(54.)).right(px(0.)).top(px(0.)).h(px(NIGHT_TOP_H)).bg(rgb(NIGHT_BG)))
+            .child(div().absolute().left(px(54.)).right(px(0.)).top(px(NIGHT_BOT_TOP)).h(px(NIGHT_BOT_H)).bg(rgb(NIGHT_BG)))
+            .child(h_flex().items_start().child(gutter).children(columns));
+
+        // The body scrolls inside a fixed frame; day-of-week header stays put above.
         let timeline = div()
+            .id("cal-scroll")
+            .flex_1().min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .border_1().border_color(rgb(palette::BORDER))
             .border_t_0()
             .rounded_b(px(12.))
-            .overflow_hidden()
-            .child(h_flex().items_start().child(gutter).children(columns));
+            .child(timeline_body);
 
         // --- form below ------------------------------------------------------
         let editing = self.editing_id.is_some();
@@ -386,8 +413,17 @@ impl Render for CalendarView {
             )
             .child(h_flex().items_center().justify_between().flex_wrap().gap(px(8.)).child(day_buttons).child(buttons));
 
+        // Open scrolled to ~07:00 (past the shaded night hours), once per view.
+        if !self.did_autoscroll {
+            self.scroll.set_offset(point(px(0.), px(-(WORK_START_H * HOUR_H - 16.0))));
+            self.did_autoscroll = true;
+        }
+
         // --- page ------------------------------------------------------------
-        div()
+        // Fill the panel so the timeline body scrolls internally while the
+        // header / day row / form stay put (the outer panel then doesn't scroll).
+        v_flex()
+            .size_full()
             .px(px(40.)).pt(px(34.)).pb(px(40.))
             .child(header)
             .child(day_head)

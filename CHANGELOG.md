@@ -3,6 +3,15 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- Calendar: the week timeline now spans the full **00:00–24:00** day (matching the
+  design) instead of a fixed 08:00–18:00 window, so time tracked outside working
+  hours (evenings, early mornings) is no longer clipped out of view. The timeline
+  body scrolls under a pinned day-of-week header, opens scrolled to ~07:00, and
+  shades the night hours (00:00–07:00 and 21:00–24:00) grey.
+
 ## [0.2.0] — 2026-07-06
 
 ### Added
@@ -65,6 +74,8 @@ local SQLite storage, styled to match the approved Time Tracker design.
 - Prebuilt binaries for Windows, macOS and Linux are attached to this release (built
   by CI). Building on macOS needs the Xcode Metal toolchain — see the README.
 
+[Unreleased]: https://github.com/konnectr/FableTime/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/konnectr/FableTime/releases/tag/v0.2.0
 [0.1.2]: https://github.com/konnectr/FableTime/releases/tag/v0.1.2
 [0.1.1]: https://github.com/konnectr/FableTime/releases/tag/v0.1.1
 [0.1.0]: https://github.com/konnectr/FableTime/releases/tag/v0.1.0

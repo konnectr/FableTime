@@ -71,13 +71,34 @@ pub struct EntryDetail {
     pub color: String,
 }
 
-/// Per-project weekly rollup for the Projects tab.
+/// Per-project rollup for the Projects tab (this-week + all-time figures).
 #[derive(Debug, Clone)]
 pub struct ProjectStat {
     pub project: Project,
     pub week_secs: i64,
-    pub entry_count: i64,
+    pub entry_count: i64,       // entries this week
+    pub total_secs: i64,        // all-time tracked
+    pub total_entries: i64,     // all-time entry count
     pub per_day_secs: [i64; 7], // Mon..Sun
+}
+
+/// One entry line inside a project's history detail.
+#[derive(Debug, Clone)]
+pub struct HistItem {
+    pub id: Id,
+    pub desc: String,
+    pub range: String,        // "HH:MM – HH:MM" (local)
+    pub dur_label: String,    // "1ч 45м"
+    pub color: String,        // project color hex
+    pub note: Option<String>, // free-text detail note (the "comment")
+}
+
+/// A day-group in a project's history: date header + day total + its entries.
+#[derive(Debug, Clone)]
+pub struct DayGroup {
+    pub date_label: String,  // "Пн, 7 июля"
+    pub total_label: String, // day total, "3ч 10м"
+    pub items: Vec<HistItem>,
 }
 
 pub struct Db {
@@ -278,10 +299,12 @@ impl Db {
             .sum())
     }
 
-    /// Per-project weekly rollup (totals, counts, per-weekday seconds).
+    /// Per-project rollup: this-week totals/counts/per-weekday seconds, plus
+    /// all-time tracked seconds and entry count.
     pub fn project_stats(&self, monday: NaiveDate) -> Result<Vec<ProjectStat>> {
         let projects = self.list_projects()?;
         let week = self.entries_for_week(monday)?;
+        let totals = self.project_totals()?;
         let days = week_days(monday);
         let now = Utc::now();
         let stats = projects
@@ -298,10 +321,84 @@ impl Db {
                         per_day_secs[i] += secs;
                     }
                 }
-                ProjectStat { project: p, week_secs, entry_count, per_day_secs }
+                let (total_secs, total_entries) = totals.get(&p.id).copied().unwrap_or((0, 0));
+                ProjectStat { project: p, week_secs, entry_count, total_secs, total_entries, per_day_secs }
             })
             .collect();
         Ok(stats)
+    }
+
+    /// All-time (seconds, entry count) per project id, across every entry. A
+    /// running entry counts up to now.
+    fn project_totals(&self) -> Result<std::collections::HashMap<Id, (i64, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project_id, start_ts, end_ts FROM time_entries")?;
+        let now = Utc::now();
+        let mut map: std::collections::HashMap<Id, (i64, i64)> = std::collections::HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Id>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (pid, start, end) = row?;
+            let s = parse_ts(&start);
+            let e = end.as_deref().map(parse_ts).unwrap_or(now);
+            let secs = (e - s).num_seconds().max(0);
+            let ent = map.entry(pid).or_insert((0, 0));
+            ent.0 += secs;
+            ent.1 += 1;
+        }
+        Ok(map)
+    }
+
+    /// Full entry history for a project, grouped by local day, most recent first.
+    pub fn project_history(&self, project_id: Id) -> Result<Vec<DayGroup>> {
+        let color = self.project_meta(project_id).map(|(_, c)| c).unwrap_or_default();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, description, note, start_ts, end_ts, created_at
+             FROM time_entries WHERE project_id = ?1 ORDER BY start_ts DESC",
+        )?;
+        let now = Utc::now();
+        let entries = stmt
+            .query_map(params![project_id], row_to_entry)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Rows are sorted by start desc, so equal local days are already adjacent.
+        let mut acc: Vec<(NaiveDate, i64, Vec<HistItem>)> = Vec::new();
+        for e in &entries {
+            let d = e.local_date();
+            let secs = e.duration_secs(now);
+            if acc.last().map(|g| g.0) != Some(d) {
+                acc.push((d, 0, Vec::new()));
+            }
+            let range = format!(
+                "{} – {}",
+                local_hm(e.start()),
+                e.end().map(local_hm).unwrap_or_else(|| "…".into())
+            );
+            let g = acc.last_mut().unwrap();
+            g.1 += secs;
+            g.2.push(HistItem {
+                id: e.id,
+                desc: e.desc_or("Без названия"),
+                range,
+                dur_label: format_dur_ru(secs),
+                color: color.clone(),
+                note: e.note.clone(),
+            });
+        }
+        Ok(acc
+            .into_iter()
+            .map(|(d, secs, items)| DayGroup {
+                date_label: ru_date_label(d),
+                total_label: format_dur_ru(secs),
+                items,
+            })
+            .collect())
     }
 
     /// Flattened export rows for an inclusive local date range `[from, to]`.

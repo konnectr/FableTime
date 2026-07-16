@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Projects: clickable cards, all-time totals, and a history detail.** Each project
+  card now leads with its all-time tracked total (next to this-week and entry count),
+  and the Projects tab header shows a grand all-time total ("всего отслежено").
+  Clicking a card opens a project detail: a totals strip plus the full entry history
+  grouped by day (most recent first). Each entry's note (comment) is shown there and
+  editable inline, exactly as in the Tracker.
+
+### Changed
+- Extracted the Tracker's entry row into a shared `entry_row` component, now reused by
+  the project detail so time entries render identically across the app.
+
 ## [0.2.1] — 2026-07-07
 
 ### Fixed

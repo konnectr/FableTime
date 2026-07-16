@@ -200,6 +200,30 @@ pub fn hours_decimal(secs: i64) -> f64 {
     secs as f64 / 3600.0
 }
 
+/// Russian short weekday, Пн..Вс.
+pub fn ru_weekday_short(d: NaiveDate) -> &'static str {
+    ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        .get(d.weekday().num_days_from_monday() as usize)
+        .copied()
+        .unwrap_or("")
+}
+
+/// Russian month name in the genitive (as used in dates: "20 июня"), 1-based.
+pub fn ru_month_gen(m: u32) -> &'static str {
+    [
+        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+        "октября", "ноября", "декабря",
+    ]
+    .get((m as usize).saturating_sub(1))
+    .copied()
+    .unwrap_or("")
+}
+
+/// A day-group header label like "Пн, 7 июля".
+pub fn ru_date_label(d: NaiveDate) -> String {
+    format!("{}, {} {}", ru_weekday_short(d), d.day(), ru_month_gen(d.month()))
+}
+
 pub fn local_ymd(ts: DateTime<Utc>) -> String {
     let d = ts.with_timezone(&Local);
     format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day())

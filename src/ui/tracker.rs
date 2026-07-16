@@ -6,11 +6,13 @@ use gpui::{div, prelude::*, px, rgb, Context, Entity, Window};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable, StyledExt};
 
+use std::rc::Rc;
+
 use crate::app::AppState;
 use crate::icons::Lucide;
 use crate::models::{format_dur_ru, format_hms, local_hm, local_hm_to_utc, parse_hm, Id};
 use crate::palette;
-use crate::ui::common::dot;
+use crate::ui::common::{dot, entry_row, EntryRow};
 
 pub struct TrackerView {
     app: Entity<AppState>,
@@ -535,99 +537,46 @@ impl Render for TrackerView {
                 let end_hm = e.entry.end().map(local_hm).unwrap_or_default();
                 let range = format!("{start_hm} – {end_hm}");
                 let dur = format_dur_ru(e.entry.duration_secs(Utc::now()));
-                let replay_desc = desc.clone();
-                let date = e.entry.local_date();
-                let (s_hm, e_hm, ed_desc) = (start_hm.clone(), end_hm.clone(), raw_desc.clone());
                 let note = e.entry.note.clone().unwrap_or_default();
-                let has_note = e.entry.note_text().is_some();
-                let note_open = self.note_open_id == Some(id);
-                let note_active = has_note || note_open;
+                let date = e.entry.local_date();
 
-                let mut text_col = v_flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .id(("edit-row", id as usize))
-                            .flex().flex_col().min_w(px(0.))
-                            .cursor_pointer()
-                            .child(div().text_size(px(14.)).font_medium().child(desc))
-                            .child(div().text_size(px(12.)).text_color(rgb(palette::TEXT_3)).child(format!("{project} · {range}")))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_edit(id, pid, date, ed_desc.clone(), s_hm.clone(), e_hm.clone(), window, cx);
-                            })),
-                    );
-                if has_note && !note_open {
-                    let preview = note.clone();
-                    let note_for_prev = note.clone();
-                    text_col = text_col.child(
-                        div()
-                            .id(("note-prev", id as usize))
-                            .flex().gap(px(6.)).mt(px(6.))
-                            .cursor_pointer()
-                            .child(Icon::new(Lucide::FileText).xsmall().text_color(rgb(palette::FAINT)))
-                            .child(
-                                div().flex_1().min_w(px(0.)).truncate()
-                                    .text_size(px(12.5)).text_color(rgb(palette::NOTE_TEXT)).child(preview),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_entry_note(id, note_for_prev.clone(), window, cx);
-                            })),
-                    );
-                }
+                // Clicking the desc/secondary line opens the inline edit form.
+                let on_text = {
+                    let (ed_desc, s_hm, e_hm) = (raw_desc.clone(), start_hm.clone(), end_hm.clone());
+                    Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                        this.begin_edit(id, pid, date, ed_desc.clone(), s_hm.clone(), e_hm.clone(), window, cx);
+                    }) as Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>
+                };
+                let on_toggle = {
+                    let n = note.clone();
+                    Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                        this.toggle_entry_note(id, n.clone(), window, cx);
+                    }) as Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>
+                };
+                // Trailing action: replay this entry as a fresh timer.
+                let replay_desc = desc.clone();
+                let replay = div()
+                    .id(("replay", id as usize))
+                    .w(px(30.)).h(px(30.)).flex().items_center().justify_center()
+                    .rounded(px(8.)).cursor_pointer()
+                    .text_color(rgb(palette::MUTED))
+                    .hover(|s| s.bg(rgb(palette::HOVER_2)))
+                    .child(Icon::new(IconName::Play).xsmall())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.app.update(cx, |s, cx| s.start(pid, &replay_desc, cx));
+                    }))
+                    .into_any_element();
 
-                let note_for_btn = note.clone();
-                let main = h_flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .px(px(18.))
-                    .py(px(14.))
-                    .child(dot(color, 9.))
-                    .child(text_col)
-                    .child(div().text_size(px(14.)).font_semibold().text_color(rgb(0x27272a)).child(dur))
-                    .child(
-                        div()
-                            .id(("note-btn", id as usize))
-                            .w(px(30.)).h(px(30.))
-                            .flex().items_center().justify_center()
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .text_color(rgb(if note_active { palette::ACCENT } else { palette::NOTE_IDLE }))
-                            .hover(|s| s.bg(rgb(palette::HOVER_2)))
-                            .child(Icon::new(Lucide::FileText).small())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_entry_note(id, note_for_btn.clone(), window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(("replay", id as usize))
-                            .w(px(30.)).h(px(30.))
-                            .flex().items_center().justify_center()
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .text_color(rgb(palette::MUTED))
-                            .hover(|s| s.bg(rgb(palette::HOVER_2)))
-                            .child(Icon::new(IconName::Play).xsmall())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app.update(cx, |s, cx| s.start(pid, &replay_desc, cx));
-                            })),
-                    );
-
-                let mut row = v_flex()
-                    .border_b_1()
-                    .border_color(rgb(palette::HAIRLINE_2))
-                    .child(main);
-                if note_open {
-                    row = row.child(
-                        div()
-                            .px(px(18.))
-                            .pb(px(14.))
-                            .pl(px(41.))
-                            .child(Input::new(&self.note_input)),
-                    );
-                }
-                row
+                let row = EntryRow {
+                    id,
+                    color,
+                    desc,
+                    secondary: format!("{project} · {range}"),
+                    dur,
+                    note,
+                    note_open: self.note_open_id == Some(id),
+                };
+                entry_row(row, &self.note_input, on_toggle, Some(on_text), Some(replay), cx)
             })
             .collect::<Vec<_>>();
 

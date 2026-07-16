@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-16
+
 ### Added
 - **Projects: clickable cards, all-time totals, and a history detail.** Each project
   card now leads with its all-time tracked total (next to this-week and entry count),
@@ -88,7 +90,8 @@ local SQLite storage, styled to match the approved Time Tracker design.
 - Prebuilt binaries for Windows, macOS and Linux are attached to this release (built
   by CI). Building on macOS needs the Xcode Metal toolchain — see the README.
 
-[Unreleased]: https://github.com/konnectr/FableTime/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/konnectr/FableTime/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/konnectr/FableTime/releases/tag/v0.3.0
 [0.2.1]: https://github.com/konnectr/FableTime/releases/tag/v0.2.1
 [0.2.0]: https://github.com/konnectr/FableTime/releases/tag/v0.2.0
 [0.1.2]: https://github.com/konnectr/FableTime/releases/tag/v0.1.2

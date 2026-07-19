@@ -31,12 +31,17 @@ pub struct AppState {
 impl AppState {
     pub fn load(cx: &mut App) -> Entity<Self> {
         let db = Db::open(&default_db_path()).expect("open database");
-        cx.new(|cx| {
+        let state = cx.new(|cx| {
             let mut state = Self {
                 db,
                 running: None,
                 tick: None,
             };
+            // Close a timer left running by a previous crash / hard shutdown,
+            // trimming it back to its last heartbeat before we read the snapshot.
+            if let Err(e) = state.db.reconcile_running() {
+                eprintln!("reconcile_running failed: {e:#}");
+            }
             if let Ok(Some(entry)) = state.db.running_entry() {
                 let (project, color) = state.db.project_meta(entry.project_id).unwrap_or_default();
                 state.running = Some(RunningInfo {
@@ -51,7 +56,27 @@ impl AppState {
                 state.start_tick(cx);
             }
             state
+        });
+
+        // Stop the running timer when the app terminates (Cmd+Q, or the OS asking
+        // us to quit on logout / shutdown) so it doesn't keep counting across the
+        // closed period. A hard power-off can't be caught — nothing runs then.
+        let handle = state.clone();
+        cx.on_app_quit(move |cx| {
+            handle.update(cx, |s, _| {
+                if s.running.is_some() {
+                    if let Err(e) = s.db.stop_running() {
+                        eprintln!("stop_running on quit failed: {e:#}");
+                    }
+                    let _ = s.db.clear_heartbeat();
+                    s.running = None;
+                }
+            });
+            async {}
         })
+        .detach();
+
+        state
     }
 
     pub fn is_running(&self) -> bool {
@@ -62,6 +87,7 @@ impl AppState {
     pub fn start(&mut self, project_id: Id, description: &str, cx: &mut Context<Self>) {
         match self.db.start_entry(project_id, description) {
             Ok(entry_id) => {
+                let _ = self.db.heartbeat();
                 let (project, color) = self.db.project_meta(project_id).unwrap_or_default();
                 self.running = Some(RunningInfo {
                     entry_id,
@@ -83,6 +109,7 @@ impl AppState {
         if let Err(e) = self.db.stop_running() {
             eprintln!("stop_running failed: {e:#}");
         }
+        let _ = self.db.clear_heartbeat();
         self.running = None;
         self.tick = None;
         cx.notify();
@@ -115,9 +142,20 @@ impl AppState {
 
     fn start_tick(&mut self, cx: &mut Context<Self>) {
         self.tick = Some(cx.spawn(async move |this, cx| {
+            let mut ticks: u32 = 0;
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                ticks += 1;
+                let beat = ticks % 15 == 0; // persist a heartbeat every ~15s
+                if this
+                    .update(cx, |s, cx| {
+                        if beat {
+                            let _ = s.db.heartbeat();
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

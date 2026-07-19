@@ -60,7 +60,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE time_entries ADD COLUMN note TEXT;
     ALTER TABLE projects     ADD COLUMN note TEXT;
     "#,
+    // v4 — small key/value store (used for the running-timer heartbeat, so a
+    // crash / hard shutdown can trim a still-running entry on next launch).
+    r#"
+    CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
+    "#,
 ];
+
+/// Heartbeats older than this (seconds) mean the app died without stopping the
+/// timer, so on launch we close the entry at the last heartbeat instead of
+/// counting the dead gap.
+pub const HEARTBEAT_STALE_SECS: i64 = 45;
 
 /// A time entry joined with its project name + color — for list/detail views.
 #[derive(Debug, Clone)]
@@ -195,11 +205,71 @@ impl Db {
     }
 
     pub fn stop_running(&self) -> Result<()> {
+        self.stop_running_at(&now_rfc3339())
+    }
+
+    /// Close any open entry at an explicit timestamp (used to trim a timer left
+    /// running by a crash/shutdown, back to its last heartbeat).
+    pub fn stop_running_at(&self, ts: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE time_entries SET end_ts = ?1 WHERE end_ts IS NULL",
-            params![now_rfc3339()],
+            params![ts],
         )?;
         Ok(())
+    }
+
+    // --- app_meta (key/value) + running-timer heartbeat --------------------
+
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM app_meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn del_meta(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM app_meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
+    /// Record that the running timer is still alive (called periodically).
+    pub fn heartbeat(&self) -> Result<()> {
+        self.set_meta("running_heartbeat", &now_rfc3339())
+    }
+
+    pub fn clear_heartbeat(&self) -> Result<()> {
+        self.del_meta("running_heartbeat")
+    }
+
+    /// If a timer is still running but its heartbeat is stale (the app died
+    /// without stopping it), close it at the last heartbeat. Returns whether a
+    /// stale entry was trimmed. Called once at startup.
+    pub fn reconcile_running(&self) -> Result<bool> {
+        if self.running_entry()?.is_none() {
+            self.clear_heartbeat()?;
+            return Ok(false);
+        }
+        let Some(hb) = self.get_meta("running_heartbeat")? else {
+            // Running with no heartbeat (e.g. pre-v4 data): start one now so a
+            // future crash is trimmable, but don't touch the entry.
+            self.heartbeat()?;
+            return Ok(false);
+        };
+        let stale = (Utc::now() - parse_ts(&hb)).num_seconds() > HEARTBEAT_STALE_SECS;
+        if stale {
+            self.stop_running_at(&hb)?;
+            self.clear_heartbeat()?;
+        }
+        Ok(stale)
     }
 
     pub fn running_entry(&self) -> Result<Option<TimeEntry>> {

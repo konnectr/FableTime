@@ -5,6 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- The running timer no longer keeps counting across a closed app or a powered-off
+  computer. On a clean quit it stops at quit time; if the app is killed or the machine
+  loses power, the entry is trimmed on next launch back to its last heartbeat (written
+  every ~15s) instead of counting the whole dead gap. Adds a small `app_meta` table
+  (migration v4) for the heartbeat.
+
 ## [0.3.0] — 2026-07-16
 
 ### Added

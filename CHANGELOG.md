@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-07-19
+
 ### Fixed
 - The running timer no longer keeps counting across a closed app or a powered-off
   computer. On a clean quit it stops at quit time; if the app is killed or the machine
@@ -97,7 +99,8 @@ local SQLite storage, styled to match the approved Time Tracker design.
 - Prebuilt binaries for Windows, macOS and Linux are attached to this release (built
   by CI). Building on macOS needs the Xcode Metal toolchain — see the README.
 
-[Unreleased]: https://github.com/konnectr/FableTime/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/konnectr/FableTime/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/konnectr/FableTime/releases/tag/v0.3.1
 [0.3.0]: https://github.com/konnectr/FableTime/releases/tag/v0.3.0
 [0.2.1]: https://github.com/konnectr/FableTime/releases/tag/v0.2.1
 [0.2.0]: https://github.com/konnectr/FableTime/releases/tag/v0.2.0

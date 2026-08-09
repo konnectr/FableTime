@@ -17,8 +17,27 @@ pub struct Project {
     pub name: String,
     pub client: Option<String>,
     pub color: String, // "#rrggbb"
-    pub note: Option<String>, // free-text project note (links, rate, access…)
+    pub note: Option<String>, // free-text project note (links, access…)
     pub archived: bool,
+    pub created_at: String,
+    pub hourly_rate: Option<f64>, // ₽/hour; None or <=0 = not billable
+}
+
+impl Project {
+    pub fn is_billable(&self) -> bool {
+        self.hourly_rate.is_some_and(|r| r > 0.0)
+    }
+}
+
+/// A recorded payment against a project: `minutes` paid for, at `rate` ₽/hour,
+/// on `paid_date` (local calendar date, "YYYY-MM-DD").
+#[derive(Debug, Clone)]
+pub struct Payment {
+    pub id: Id,
+    pub project_id: Id,
+    pub minutes: i64,
+    pub rate: f64,
+    pub paid_date: String,
     pub created_at: String,
 }
 
@@ -154,6 +173,21 @@ pub fn parse_hm(s: &str) -> Option<(u32, u32)> {
     (h < 24 && m < 60).then_some((h, m))
 }
 
+/// Parse a `ДД.ММ.ГГГГ` string into a calendar date (permissive on leading
+/// zeros), validating via `NaiveDate`.
+pub fn parse_date_ru(s: &str) -> Option<NaiveDate> {
+    let mut parts = s.trim().splitn(3, '.');
+    let d: u32 = parts.next()?.trim().parse().ok()?;
+    let m: u32 = parts.next()?.trim().parse().ok()?;
+    let y: i32 = parts.next()?.trim().parse().ok()?;
+    NaiveDate::from_ymd_opt(y, m, d)
+}
+
+/// Format a date as `ДД.ММ.ГГГГ` for the payment-form input's round-trip.
+pub fn format_date_ru(d: NaiveDate) -> String {
+    format!("{:02}.{:02}.{:04}", d.day(), d.month(), d.year())
+}
+
 /// Build a stored UTC string from a local wall-clock date + (hour, minute).
 pub fn local_hm_to_utc(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
     let naive = date.and_hms_opt(hour, minute, 0)?;
@@ -198,6 +232,31 @@ pub fn format_dur_ru(secs: i64) -> String {
 
 pub fn hours_decimal(secs: i64) -> f64 {
     secs as f64 / 3600.0
+}
+
+/// Decimal hours with a Russian comma, e.g. `1,75 ч` — the invoice table's
+/// "Часы" column format (distinct from `format_dur_ru`'s "1ч 45м" style).
+pub fn format_hours_ru(minutes: i64) -> String {
+    format!("{:.2} ч", minutes as f64 / 60.0).replace('.', ",")
+}
+
+/// Money in ₽, thin-space-grouped thousands, rounded to the whole ruble —
+/// matches the mockup's `fmtMoney`, which always `Math.round`s and never
+/// shows kopecks.
+pub fn format_money_ru(amount: f64) -> String {
+    let n = amount.round().max(0.0) as i64;
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        let from_end = bytes.len() - i;
+        if i > 0 && from_end % 3 == 0 {
+            grouped.push('\u{2009}'); // thin space
+        }
+        grouped.push(*b as char);
+    }
+    grouped.push_str(" ₽");
+    grouped
 }
 
 /// Russian short weekday, Пн..Вс.
@@ -278,5 +337,28 @@ mod tests {
     fn link_segments_plain_text_is_one_segment() {
         assert_eq!(link_segments("just text"), vec![Segment::Text("just text".into())]);
         assert_eq!(link_segments(""), vec![]);
+    }
+
+    #[test]
+    fn format_money_ru_groups_and_rounds() {
+        assert_eq!(format_money_ru(12500.0), "12\u{2009}500 ₽");
+        assert_eq!(format_money_ru(1234.5), "1\u{2009}235 ₽"); // rounds, no kopecks
+        assert_eq!(format_money_ru(900.0), "900 ₽");
+        assert_eq!(format_money_ru(-5.0), "0 ₽"); // never negative
+    }
+
+    #[test]
+    fn format_hours_ru_uses_comma() {
+        assert_eq!(format_hours_ru(105), "1,75 ч");
+        assert_eq!(format_hours_ru(30), "0,50 ч");
+    }
+
+    #[test]
+    fn date_ru_roundtrips() {
+        let d = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        assert_eq!(format_date_ru(d), "24.06.2026");
+        assert_eq!(parse_date_ru("24.06.2026"), Some(d));
+        assert_eq!(parse_date_ru(" 3.7.2026 "), NaiveDate::from_ymd_opt(2026, 7, 3));
+        assert_eq!(parse_date_ru("not a date"), None);
     }
 }

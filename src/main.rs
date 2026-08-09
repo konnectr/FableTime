@@ -7,9 +7,11 @@
 
 mod app;
 mod assets;
+mod billing;
 mod db;
 mod exporter;
 mod icons;
+mod invoice_pdf;
 mod models;
 mod palette;
 mod ui;

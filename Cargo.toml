@@ -37,6 +37,9 @@ anyhow = "1"
 # a composite AssetSource alongside gpui-component's bundle (see src/assets.rs).
 rust-embed = "8"
 
+# PDF invoice generation, rendering an HTML/CSS template ("html" feature).
+printpdf = { version = "0.12.5", features = ["html"] }
+
 # Embed the app icon into the Windows .exe (Windows host only).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

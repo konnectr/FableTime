@@ -38,6 +38,14 @@ pub struct Pal {
     pub text: u32,
 }
 
+// --- payment status (independent of per-project color) ----------------------
+pub const PAID: u32 = 0x0d9488;
+pub const PAID_SOFT: u32 = 0xe4f4f1;
+pub const PAID_TEXT: u32 = 0x0f766e;
+pub const UNPAID: u32 = 0xd97706;
+pub const UNPAID_SOFT: u32 = 0xfcf2e3;
+pub const UNPAID_TEXT: u32 = 0xb45309;
+
 pub const PROJECT_PALETTE: &[Pal] = &[
     Pal { main: 0x4f46e5, soft: 0xeef0fe, text: 0x4338ca }, // indigo
     Pal { main: 0x0d9488, soft: 0xe4f4f1, text: 0x0f766e }, // teal

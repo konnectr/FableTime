@@ -65,6 +65,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
     "#,
+    // v5 — per-project hourly rate + recorded payments, for invoicing.
+    r#"
+    ALTER TABLE projects ADD COLUMN hourly_rate REAL;
+
+    CREATE TABLE payments (
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id),
+      minutes INTEGER NOT NULL,
+      rate REAL NOT NULL,
+      paid_date TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_payments_project ON payments(project_id);
+    "#,
 ];
 
 /// Heartbeats older than this (seconds) mean the app died without stopping the
@@ -90,6 +104,7 @@ pub struct ProjectStat {
     pub total_secs: i64,        // all-time tracked
     pub total_entries: i64,     // all-time entry count
     pub per_day_secs: [i64; 7], // Mon..Sun
+    pub paid_secs: i64,         // all-time paid, capped at total_secs
 }
 
 /// One entry line inside a project's history detail.
@@ -155,11 +170,20 @@ impl Db {
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, client, color, note, archived, created_at
+            "SELECT id, name, client, color, note, archived, created_at, hourly_rate
              FROM projects WHERE archived = 0 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], row_to_project)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Set (or clear) a project's hourly rate. `None`/`Some(<=0.0)` both mean
+    /// "not billable".
+    pub fn set_project_rate(&self, id: Id, rate: Option<f64>) -> Result<()> {
+        let r = rate.filter(|r| *r > 0.0);
+        self.conn
+            .execute("UPDATE projects SET hourly_rate = ?2 WHERE id = ?1", params![id, r])?;
+        Ok(())
     }
 
     pub fn archive_project(&self, id: Id) -> Result<()> {
@@ -185,6 +209,56 @@ impl Db {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(Into::into)
+    }
+
+    // --- payments -------------------------------------------------------------
+
+    /// Record a payment against a project.
+    pub fn add_payment(&self, project_id: Id, minutes: i64, rate: f64, paid_date: &str) -> Result<Id> {
+        self.conn.execute(
+            "INSERT INTO payments (project_id, minutes, rate, paid_date, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project_id, minutes, rate, paid_date, now_rfc3339()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A project's payments, oldest `paid_date` first.
+    pub fn list_payments(&self, project_id: Id) -> Result<Vec<Payment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, minutes, rate, paid_date, created_at
+             FROM payments WHERE project_id = ?1 ORDER BY paid_date ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], row_to_payment)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Undo a mis-entered payment.
+    pub fn delete_payment(&self, id: Id) -> Result<()> {
+        self.conn.execute("DELETE FROM payments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Every payment across every project — for the batch-reduce in `project_stats`.
+    fn payments_all(&self) -> Result<Vec<Payment>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, project_id, minutes, rate, paid_date, created_at FROM payments")?;
+        let rows = stmt.query_map([], row_to_payment)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// A project's entries, chronological ASCENDING — the FIFO input for
+    /// `billing::paid_states` / `billing::build_invoice`. (`project_history` is
+    /// DESC and pre-formats into `HistItem`/`DayGroup` for display, so it isn't
+    /// reusable here.)
+    pub fn entries_for_project_asc(&self, project_id: Id) -> Result<Vec<TimeEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, description, note, start_ts, end_ts, created_at
+             FROM time_entries WHERE project_id = ?1 ORDER BY start_ts ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], row_to_entry)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     // --- time entries -------------------------------------------------------
@@ -375,6 +449,7 @@ impl Db {
         let projects = self.list_projects()?;
         let week = self.entries_for_week(monday)?;
         let totals = self.project_totals()?;
+        let payments = self.payments_all()?;
         let days = week_days(monday);
         let now = Utc::now();
         let stats = projects
@@ -392,7 +467,19 @@ impl Db {
                     }
                 }
                 let (total_secs, total_entries) = totals.get(&p.id).copied().unwrap_or((0, 0));
-                ProjectStat { project: p, week_secs, entry_count, total_secs, total_entries, per_day_secs }
+                let paid_min = crate::billing::paid_minutes_for_project(
+                    payments.iter().filter(|pay| pay.project_id == p.id).map(|pay| pay.minutes),
+                    total_secs / 60,
+                );
+                ProjectStat {
+                    project: p,
+                    week_secs,
+                    entry_count,
+                    total_secs,
+                    total_entries,
+                    per_day_secs,
+                    paid_secs: paid_min * 60,
+                }
             })
             .collect();
         Ok(stats)
@@ -523,6 +610,7 @@ fn row_to_project(r: &Row) -> rusqlite::Result<Project> {
         note: r.get("note")?,
         archived: r.get::<_, i64>("archived")? != 0,
         created_at: r.get("created_at")?,
+        hourly_rate: r.get("hourly_rate")?,
     })
 }
 
@@ -538,17 +626,27 @@ fn row_to_entry(r: &Row) -> rusqlite::Result<TimeEntry> {
     })
 }
 
+fn row_to_payment(r: &Row) -> rusqlite::Result<Payment> {
+    Ok(Payment {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        minutes: r.get("minutes")?,
+        rate: r.get("rate")?,
+        paid_date: r.get("paid_date")?,
+        created_at: r.get("created_at")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
 
     #[test]
-    fn migration_reaches_v3() {
+    fn migration_reaches_current() {
         let db = Db::open_in_memory().unwrap();
         let v: i64 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);
-        assert_eq!(v, 3);
     }
 
     #[test]
@@ -583,5 +681,39 @@ mod tests {
         let e = list.iter().find(|e| e.entry.id == eid).unwrap();
         assert_eq!(e.entry.note.as_deref(), Some("what I did"));
         assert_eq!(e.entry.description.as_deref(), Some("newdesc"));
+    }
+
+    #[test]
+    fn project_rate_roundtrips_and_none_means_unbillable() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        let get = |db: &Db| db.list_projects().unwrap().into_iter().find(|p| p.id == pid).unwrap();
+
+        assert!(!get(&db).is_billable());
+        db.set_project_rate(pid, Some(3500.0)).unwrap();
+        assert_eq!(get(&db).hourly_rate, Some(3500.0));
+        assert!(get(&db).is_billable());
+
+        db.set_project_rate(pid, Some(0.0)).unwrap();
+        assert!(!get(&db).is_billable()); // <=0 stored as NULL
+
+        db.set_project_rate(pid, None).unwrap();
+        assert_eq!(get(&db).hourly_rate, None);
+    }
+
+    #[test]
+    fn add_payment_and_list_orders_by_date() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        db.add_payment(pid, 480, 3500.0, "2026-06-22").unwrap();
+        db.add_payment(pid, 720, 3500.0, "2026-06-15").unwrap();
+
+        let list = db.list_payments(pid).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].paid_date, "2026-06-15"); // oldest first
+        assert_eq!(list[1].paid_date, "2026-06-22");
+
+        db.delete_payment(list[0].id).unwrap();
+        assert_eq!(db.list_payments(pid).unwrap().len(), 1);
     }
 }

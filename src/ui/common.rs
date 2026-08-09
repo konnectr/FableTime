@@ -7,6 +7,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{h_flex, v_flex, Icon, Sizable, StyledExt};
 use gpui_component::IconName;
 
+use crate::billing::PaidState;
 use crate::icons::Lucide;
 use crate::models::{Id, Project};
 use crate::palette;
@@ -109,6 +110,26 @@ pub fn dot(color: u32, size: f32) -> Div {
         .h(px(size))
         .rounded_full()
         .bg(rgb(color))
+}
+
+/// Small paid/partial/unpaid status chip for a billable project's time
+/// entries — the `entry_row` `trailing` slot's payment-status badge.
+pub fn paid_status_pill(state: PaidState) -> Div {
+    let (bg, text, label) = match state {
+        PaidState::Paid => (palette::PAID_SOFT, palette::PAID_TEXT, "Оплачено"),
+        PaidState::Partial { .. } => (palette::UNPAID_SOFT, palette::UNPAID_TEXT, "Частично"),
+        PaidState::Unpaid => (palette::BORDER_2, palette::TEXT_2, "К оплате"),
+    };
+    div()
+        .flex_shrink_0()
+        .px(px(8.))
+        .py(px(3.))
+        .rounded(px(20.))
+        .bg(rgb(bg))
+        .text_size(px(10.5))
+        .font_semibold()
+        .text_color(rgb(text))
+        .child(label)
 }
 
 /// A reusable project picker: a chip showing the selected project and, when

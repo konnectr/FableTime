@@ -6,16 +6,36 @@ on:
 
 # contents/pull-requests: maintain the release PR (version bump + CHANGELOG) and
 # create the tag + GitHub Release when it's merged. issues: release-please links
-# release notes back to referenced issues/PRs.
+# release notes back to referenced issues/PRs. actions/id-token: forwarded to the
+# called build workflow (its optional SignPath step needs them; harmless unused
+# otherwise).
 permissions:
   contents: write
   issues: write
   pull-requests: write
+  actions: read
+  id-token: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           release-type: rust
+
+  # release-please creates the tag/release via GITHUB_TOKEN, which GitHub
+  # deliberately excludes from triggering build.yml's own `tags: ["v*"]` push
+  # trigger (anti-recursion rule) — so call it directly instead, only when a
+  # release was actually created, passing the tag it just tagged.
+  build:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

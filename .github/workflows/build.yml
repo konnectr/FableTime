@@ -5,7 +5,28 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # tag: optional manual "attach binaries to this release" escape hatch —
+  # dispatch with a tag to (re)run the build and attach its assets without
+  # waiting for release-please or a real tag push.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach binaries to (optional)"
+        required: false
+        type: string
+        default: ""
+  # Called by release-please.yml right after it creates a release: tags pushed
+  # by release-please-action's GITHUB_TOKEN don't trigger the `tags: ["v*"]`
+  # push trigger above (GitHub suppresses workflow-triggering pushes made with
+  # the default token, to avoid recursive runs) — so release-please.yml calls
+  # this workflow explicitly instead, passing the tag it just created.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build and attach binaries to"
+        required: false
+        type: string
+        default: ""
 
 # contents: publish the GitHub Release. actions: SignPath downloads the build
 # artifact. id-token: SignPath origin-verifies the build via GitHub OIDC.
@@ -48,6 +69,8 @@ jobs:
             artifact: timetracker-windows
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -97,7 +120,7 @@ jobs:
       # Sign the Windows binary if SignPath is configured (repo vars present).
       - name: Sign Windows binary (SignPath)
         id: sign
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_PROJECT_SLUG != ''
+        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '') && vars.SIGNPATH_PROJECT_SLUG != ''
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -113,13 +136,15 @@ jobs:
         shell: bash
         run: cp "dist-signed/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
 
-      # On a v* tag, attach the (signed, if applicable) binary to the GitHub
-      # Release release-please already created for that tag. Each matrix job
-      # appends its own platform; body is left alone (release-please's own
-      # per-version notes), not overwritten with the full CHANGELOG.md.
+      # On a v* tag (direct push, or called from release-please.yml with the
+      # tag it just created), attach the (signed, if applicable) binary to
+      # that GitHub Release. Each matrix job appends its own platform; body is
+      # left alone (release-please's own per-version notes), not overwritten
+      # with the full CHANGELOG.md.
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/${{ matrix.asset }}
           fail_on_unmatched_files: true

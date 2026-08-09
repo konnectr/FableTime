@@ -37,18 +37,20 @@ Linux/Windows need no `DEVELOPER_DIR`. Linux needs graphics/font dev packages �
 
 ## Releasing
 
-Version bumps go through **`cargo-release`** (config in `release.toml`; one-time
-`cargo install cargo-release`). Commits follow **Conventional Commits** (`feat:`, `fix:`,
-`refactor:`, `release:`).
+Releases are automated by **`release-please-action`** (`.github/workflows/release-please.yml`,
+config in `release-please-config.json` / `.release-please-manifest.json`). Commits follow
+**Conventional Commits** (`feat:`, `fix:`, `refactor:`, …) as before — that's what drives both
+the version bump and the changelog.
 
-1. Write the human-curated notes for the release under `## [Unreleased]` in `CHANGELOG.md`.
-2. `cargo release patch` (or `minor` / `major`) — bumps `Cargo.toml`, moves the
-   `Unreleased` heading down under the new `X.Y.Z — DATE`, fixes the bottom links, commits
-   `release: vX.Y.Z`, tags `vX.Y.Z`, and pushes.
-3. CI (`build.yml`, trigger `tags: ["v*"]`) builds the binaries and publishes the GitHub
-   Release.
-
-Dry-run first with `cargo release patch` (no `--execute` = it only prints the plan).
+1. Push commits to `main` as usual. On every push, `release-please-action` opens or updates a
+   `chore(main): release X.Y.Z` PR that bumps `Cargo.toml` and appends a `CHANGELOG.md` section
+   generated from the Conventional Commit subjects since the last release. (Unlike the old
+   flow, there's no separate hand-curated "Unreleased" authoring step — edit the release PR's
+   diff directly if the generated notes need polish before merging.)
+2. Review and merge that PR. On merge, release-please creates the `vX.Y.Z` tag and the GitHub
+   Release itself (using its own generated notes as the release body).
+3. CI (`build.yml`, trigger `tags: ["v*"]`) builds the binaries and attaches them to that
+   Release without touching its body.
 
 **Test overrides (env):** `TIMETRACKER_DB=<path>` points at a throwaway DB (keeps the real
 one untouched); `TIMETRACKER_TAB=tracker|calendar|projects|export` sets the initial tab —
@@ -70,16 +72,18 @@ src/
   main.rs        bootstrap: application().with_assets → gpui_component::init → window → Root
   palette.rs     design colors as u32 0xRRGGBB + per-project palette (gpui-free)
   models.rs      row structs + pure time helpers (UTC storage, local day/week grouping)
-  db.rs          SQLite: user_version migrations (v1→v2), CRUD, day/week totals, project
+  db.rs          SQLite: user_version migrations (v1→v5), CRUD, day/week totals, project
                  stats, range export
   app.rs         AppState entity: owns Connection + running-entry snapshot + 1s timer Task
   exporter.rs    pure (no-gpui) CSV/JSON/Markdown serialization + per-project/per-day totals
+  billing.rs     pure paid/unpaid time allocation (FIFO oldest-first) + invoice-row building
+  invoice_pdf.rs renders a billing::Invoice to PDF via printpdf's HTML/CSS renderer
   ui/
     root.rs      38px top bar + 236px sidebar (4 tabs + Today card) + scrolling panel
-    common.rs    small shared helpers (dot)
+    common.rs    small shared helpers (dot, paid_status_pill)
     tracker.rs   work bar + today's entries + replay
     calendar.rs  Mon–Sun week timeline (absolute-positioned blocks) + add/edit/delete form
-    projects.rs  project cards + sparkline + create
+    projects.rs  project cards + sparkline + create + payment recording + PDF invoice screen
     export.rs    period/project chips + format cards + rfd folder export
 ```
 
@@ -87,7 +91,11 @@ src/
 
 - **Data model:** an entry belongs directly to a **project** and carries a free-text
   **description** — there is no task layer. (Migration v2 in `db.rs` switched from the
-  original project→task→entry schema.)
+  original project→task→entry schema.) A project optionally carries an **`hourly_rate`**
+  (₽/h; `None`/`<=0` = not billable) and any number of **`payments`** rows (minutes paid,
+  rate, paid date) — `billing.rs` allocates paid minutes across a project's entries
+  oldest-first (FIFO) to derive per-entry paid/partial/unpaid status and to build a PDF
+  invoice (`invoice_pdf.rs`) for a chosen number of unpaid hours.
 - **Timestamps** stored as **UTC RFC3339** (`…Z`) so lexicographic == chronological → range
   queries use plain `<`/`>=`. Convert to local only for display / grouping (`models.rs`).
 - **One running entry**: `Db::start_entry` stops any open entry first. A manual entry and a

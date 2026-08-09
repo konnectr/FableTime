@@ -113,12 +113,13 @@ jobs:
         shell: bash
         run: cp "dist-signed/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
 
-      # On a v* tag, publish (or append to) the GitHub Release and attach the
-      # (signed, if applicable) binary. Each matrix job appends its own platform.
+      # On a v* tag, attach the (signed, if applicable) binary to the GitHub
+      # Release release-please already created for that tag. Each matrix job
+      # appends its own platform; body is left alone (release-please's own
+      # per-version notes), not overwritten with the full CHANGELOG.md.
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.asset }}
-          body_path: CHANGELOG.md
           fail_on_unmatched_files: true

@@ -1,0 +1,21 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+# contents/pull-requests: maintain the release PR (version bump + CHANGELOG) and
+# create the tag + GitHub Release when it's merged. issues: release-please links
+# release notes back to referenced issues/PRs.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: rust

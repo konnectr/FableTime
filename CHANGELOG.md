@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0](https://github.com/konnectr/FableTime/compare/v0.4.0...v0.5.0) (2026-08-09)
+
+
+### Features
+
+* **billing:** currency selection, auto-open invoices, rename finished entries ([46f9475](https://github.com/konnectr/FableTime/commit/46f947528526012ef2d0ddc9df4474d7867b164f))
+
 ## [0.4.0](https://github.com/konnectr/FableTime/compare/v0.3.1...v0.4.0) (2026-08-09)
 
 

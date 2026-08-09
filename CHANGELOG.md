@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0](https://github.com/konnectr/FableTime/compare/v0.3.1...v0.4.0) (2026-08-09)
+
+
+### Features
+
+* **billing:** hourly payment tracking and PDF invoices ([359b1c9](https://github.com/konnectr/FableTime/commit/359b1c969de0786a5c25d69064858303cf4f657f))
+
 ## [Unreleased]
 
 ## [0.3.1] — 2026-07-19

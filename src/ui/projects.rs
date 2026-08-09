@@ -17,8 +17,8 @@ use crate::db::{DayGroup, ProjectStat};
 use crate::icons::Lucide;
 use crate::invoice_pdf;
 use crate::models::{
-    format_date_ru, format_dur_ru, format_money_ru, link_segments, local_hm, monday_of,
-    parse_date_ru, Id, Segment,
+    format_date_ru, format_dur_ru, format_money, link_segments, local_hm, monday_of,
+    parse_date_ru, Currency, Id, Segment,
 };
 use crate::palette;
 use crate::ui::common::{entry_row, paid_status_pill, EntryRow};
@@ -33,10 +33,16 @@ pub struct ProjectsView {
     open_id: Option<Id>,
     // Inline editor for a history entry's note (comment) in the detail view.
     entry_note_open_id: Option<Id>,
+    // Inline rename of a history entry's description ("title") — replaces
+    // that row with a small text field + save/cancel, like the note editor
+    // but swapping the whole row (mirrors Tracker's edit_row pattern).
+    entry_rename_id: Option<Id>,
+    entry_rename_input: Entity<InputState>,
 
     // Rate edit (pencil toggle) — only meaningful while a detail view is open.
     rate_edit_open: bool,
     rate_input: Entity<InputState>,
+    rate_edit_currency: Currency,
 
     // Payment-recording form (toggle, but with an explicit submit — structured
     // numeric fields need validation before insert, unlike the note's live save).
@@ -97,6 +103,7 @@ impl ProjectsView {
         let pay_rate_input = cx.new(|cx| InputState::new(window, cx).placeholder("3500"));
         let invoice_hours_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
         let invoice_minutes_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
+        let entry_rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Название задачи"));
 
         Self {
             app,
@@ -105,8 +112,11 @@ impl ProjectsView {
             note_input,
             open_id: None,
             entry_note_open_id: None,
+            entry_rename_id: None,
+            entry_rename_input,
             rate_edit_open: false,
             rate_input,
+            rate_edit_currency: Currency::Rub,
             pay_form_open: false,
             pay_hours_input,
             pay_minutes_input,
@@ -158,6 +168,30 @@ impl ProjectsView {
         cx.notify();
     }
 
+    /// Open the inline rename field for a history entry, replacing its row.
+    fn begin_entry_rename(&mut self, id: Id, desc: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_rename_id = Some(id);
+        self.entry_note_open_id = None;
+        self.entry_rename_input.update(cx, |s, cx| s.set_value(desc, window, cx));
+        cx.notify();
+    }
+
+    fn cancel_entry_rename(&mut self, cx: &mut Context<Self>) {
+        self.entry_rename_id = None;
+        cx.notify();
+    }
+
+    fn save_entry_rename(&mut self, id: Id, cx: &mut Context<Self>) {
+        let desc = self.entry_rename_input.read(cx).value().to_string();
+        self.app.update(cx, |s, _| {
+            if let Err(e) = s.db.set_entry_description(id, Some(&desc)) {
+                eprintln!("set_entry_description: {e:#}");
+            }
+        });
+        self.entry_rename_id = None;
+        cx.notify();
+    }
+
     /// Reset every billing-related toggle/input — called whenever the open
     /// project changes (or closes), so stale state from one project's forms
     /// never leaks into another's.
@@ -193,24 +227,31 @@ impl ProjectsView {
             .collect()
     }
 
-    fn toggle_rate_edit(&mut self, current: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_rate_edit(&mut self, current: Option<f64>, currency: Currency, window: &mut Window, cx: &mut Context<Self>) {
         if self.rate_edit_open {
             self.rate_edit_open = false;
         } else {
             self.rate_edit_open = true;
             self.pay_form_open = false;
+            self.rate_edit_currency = currency;
             let val = current.map(format_rate_plain).unwrap_or_default();
             self.rate_input.update(cx, |s, cx| s.set_value(val, window, cx));
         }
         cx.notify();
     }
 
+    fn set_rate_edit_currency(&mut self, currency: Currency, cx: &mut Context<Self>) {
+        self.rate_edit_currency = currency;
+        cx.notify();
+    }
+
     fn submit_rate(&mut self, pid: Id, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.rate_input.read(cx).value().trim().replace(',', ".");
         let rate = raw.parse::<f64>().ok().filter(|r| *r > 0.0);
+        let currency = self.rate_edit_currency;
         self.app.update(cx, |s, _| {
-            if let Err(e) = s.db.set_project_rate(pid, rate) {
-                eprintln!("set_project_rate: {e:#}");
+            if let Err(e) = s.db.set_project_billing(pid, rate, currency) {
+                eprintln!("set_project_billing: {e:#}");
             }
         });
         self.rate_edit_open = false;
@@ -316,12 +357,17 @@ impl ProjectsView {
                     Ok::<_, anyhow::Error>(path)
                 })
                 .await;
-            let msg = match result {
-                Ok(path) => format!("Счёт сохранён → {}", path.display()),
-                Err(e) => format!("Ошибка сохранения счёта: {e:#}"),
-            };
             let _ = this.update(cx, |this, cx| {
-                this.status = msg.into();
+                this.status = match &result {
+                    Ok(path) => format!("Счёт сохранён → {}", path.display()),
+                    Err(e) => format!("Ошибка сохранения счёта: {e:#}"),
+                }
+                .into();
+                // Open the saved PDF in the OS default viewer right away, so
+                // the user sees it land and doesn't have to hunt for it.
+                if let Ok(path) = &result {
+                    cx.open_with_system(path);
+                }
                 cx.notify();
             });
         })
@@ -329,8 +375,8 @@ impl ProjectsView {
     }
 }
 
-/// Plain numeric string for an editable ₽/hour rate field (no grouping, no
-/// currency sign) — distinct from `format_money_ru`, which is display-only.
+/// Plain numeric string for an editable per-hour rate field (no grouping, no
+/// currency sign) — distinct from `format_money`, which is display-only.
 fn format_rate_plain(r: f64) -> String {
     if r.fract() == 0.0 {
         format!("{r:.0}")
@@ -382,7 +428,15 @@ impl Render for ProjectsView {
                     );
                     let limit = self.invoice_limit_minutes(cx);
                     let rate = stat.project.hourly_rate.unwrap_or(0.0);
-                    let invoice = billing::build_invoice(&entries, paid_before, limit, rate, id, Local::now().naive_local());
+                    let invoice = billing::build_invoice(
+                        &entries,
+                        paid_before,
+                        limit,
+                        rate,
+                        stat.project.currency,
+                        id,
+                        Local::now().naive_local(),
+                    );
                     return self.invoice_view(stat, &invoice, cx).into_any_element();
                 }
                 let history = self.app.read(cx).db.project_history(id).unwrap_or_default();
@@ -492,6 +546,7 @@ impl ProjectsView {
                 this.open_id = Some(pid);
                 this.note_open_id = None;
                 this.entry_note_open_id = None;
+                this.entry_rename_id = None;
                 this.reset_billing_forms(window, cx);
                 cx.notify();
             }))
@@ -571,7 +626,11 @@ impl ProjectsView {
                         div()
                             .font_semibold()
                             .text_color(rgb(palette::UNPAID_TEXT))
-                            .child(format!("{} · {}", format_dur_ru(unpaid_secs), format_money_ru(unpaid_amount))),
+                            .child(format!(
+                                "{} · {}",
+                                format_dur_ru(unpaid_secs),
+                                format_money(unpaid_amount, stat.project.currency)
+                            )),
                     ),
             )
     }
@@ -598,6 +657,7 @@ impl ProjectsView {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.open_id = None;
                 this.entry_note_open_id = None;
+                this.entry_rename_id = None;
                 this.reset_billing_forms(window, cx);
                 cx.notify();
             }));
@@ -649,12 +709,27 @@ impl ProjectsView {
             );
             for it in &g.items {
                 let eid = it.id;
+                if self.entry_rename_id == Some(eid) {
+                    groups = groups.child(self.entry_rename_row(eid, cx));
+                    continue;
+                }
                 let note = it.note.clone().unwrap_or_default();
                 let toggle = {
                     let n = note.clone();
                     Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
                         this.toggle_entry_note(eid, n.clone(), window, cx);
                     })
+                };
+                // Clicking the desc text opens the inline rename field. A
+                // HistItem's desc is already desc_or's placeholder-filled
+                // string, so prefill empty when it's just that placeholder —
+                // otherwise saving unchanged would literally store the
+                // Russian placeholder text instead of leaving it NULL.
+                let on_text_click = {
+                    let prefill = if it.desc == "Без названия" { String::new() } else { it.desc.clone() };
+                    Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                        this.begin_entry_rename(eid, prefill.clone(), window, cx);
+                    }) as Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>
                 };
                 let row = EntryRow {
                     id: eid,
@@ -667,7 +742,7 @@ impl ProjectsView {
                 };
                 let trailing: Option<AnyElement> =
                     paid_states.get(&eid).map(|s| paid_status_pill(*s).into_any_element());
-                groups = groups.child(entry_row(row, &self.note_input, toggle, None, trailing, cx));
+                groups = groups.child(entry_row(row, &self.note_input, toggle, Some(on_text_click), trailing, cx));
             }
         }
         if history.is_empty() {
@@ -687,6 +762,35 @@ impl ProjectsView {
             page = page.child(self.detail_note(&note, cx));
         }
         page.child(groups)
+    }
+
+    /// The inline rename field rendered in place of a history row being renamed.
+    fn entry_rename_row(&self, id: Id, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .items_center().gap(px(8.))
+            .px(px(18.)).py(px(11.))
+            .bg(rgb(0xfafaff))
+            .border_b_1().border_color(rgb(palette::HAIRLINE_2))
+            .child(div().flex_1().min_w(px(0.)).child(Input::new(&self.entry_rename_input)))
+            .child(
+                div()
+                    .id(("erename-save", id as usize))
+                    .flex().items_center().justify_center().w(px(30.)).h(px(30.)).rounded(px(8.))
+                    .cursor_pointer()
+                    .bg(rgb(palette::ACCENT)).text_color(rgb(0xffffff))
+                    .child(Icon::new(IconName::Check).xsmall().text_color(rgb(0xffffff)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.save_entry_rename(id, cx))),
+            )
+            .child(
+                div()
+                    .id(("erename-cancel", id as usize))
+                    .flex().items_center().justify_center().w(px(30.)).h(px(30.)).rounded(px(8.))
+                    .cursor_pointer()
+                    .text_color(rgb(palette::LABEL))
+                    .hover(|s| s.bg(rgb(palette::HOVER_2)))
+                    .child(Icon::new(IconName::Close).xsmall())
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_entry_rename(cx))),
+            )
     }
 
     /// Read-only note block for the detail view (icon + text with clickable links).
@@ -847,6 +951,7 @@ impl ProjectsView {
     fn payment_block(&self, stat: &ProjectStat, cx: &mut Context<Self>) -> Div {
         let pid = stat.project.id;
         let rate = stat.project.hourly_rate;
+        let currency = stat.project.currency;
         let billable = stat.project.is_billable();
         let unpaid_secs = (stat.total_secs - stat.paid_secs).max(0);
 
@@ -860,13 +965,13 @@ impl ProjectsView {
             .text_color(rgb(palette::MUTED))
             .hover(|s| s.bg(rgb(palette::HOVER_2)))
             .child(Icon::new(Lucide::Pencil).xsmall())
-            .on_click(cx.listener(move |this, _, window, cx| this.toggle_rate_edit(rate, window, cx)));
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_rate_edit(rate, currency, window, cx)));
 
         let mut header = h_flex().items_center().gap(px(10.)).mb(px(16.))
             .child(div().text_size(px(14.)).font_semibold().child("Оплата"));
         header = header.child(
             div().text_size(px(12.)).text_color(rgb(palette::MUTED)).child(if billable {
-                format!("ставка {}/ч", format_money_ru(rate.unwrap_or(0.0)))
+                format!("ставка {}/ч", format_money(rate.unwrap_or(0.0), currency))
             } else {
                 "Без биллинга".to_string()
             }),
@@ -935,7 +1040,7 @@ impl ProjectsView {
                                         .mt(px(2.))
                                         .text_size(px(12.))
                                         .text_color(rgb(palette::MUTED))
-                                        .child(format!("оплачено · {}", format_money_ru(paid_amount))),
+                                        .child(format!("оплачено · {}", format_money(paid_amount, currency))),
                                 ),
                         )
                         .child(
@@ -952,7 +1057,7 @@ impl ProjectsView {
                                         .mt(px(2.))
                                         .text_size(px(12.))
                                         .text_color(rgb(palette::MUTED))
-                                        .child(format!("к оплате · {}", format_money_ru(unpaid_amount))),
+                                        .child(format!("к оплате · {}", format_money(unpaid_amount, currency))),
                                 ),
                         ),
                 );
@@ -962,17 +1067,42 @@ impl ProjectsView {
             block = block.child(self.rate_edit_form(pid, cx));
         }
         if billable && self.pay_form_open {
-            block = block.child(self.pay_form(pid, cx));
+            block = block.child(self.pay_form(pid, currency, cx));
         }
         if billable {
-            block = block.child(self.payments_list(pid, cx));
+            block = block.child(self.payments_list(pid, currency, cx));
         }
         block
     }
 
     fn rate_edit_form(&self, pid: Id, cx: &mut Context<Self>) -> Div {
-        h_flex().items_end().gap(px(10.)).mt(px(16.)).pt(px(16.)).border_t_1().border_color(rgb(palette::HAIRLINE))
-            .child(labeled_field("Ставка, ₽/ч", 120., &self.rate_input))
+        let mut currency_row = h_flex().gap(px(6.));
+        for c in Currency::ALL {
+            let selected = self.rate_edit_currency == c;
+            currency_row = currency_row.child(
+                div()
+                    .id(SharedString::from(format!("rate-cur-{}", c.code())))
+                    .px(px(10.)).h(px(38.)).flex().items_center()
+                    .rounded(px(9.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(if selected { palette::ACCENT } else { palette::BORDER }))
+                    .when(selected, |d| d.bg(rgb(palette::ACCENT_SOFT)))
+                    .text_size(px(13.))
+                    .font_medium()
+                    .text_color(rgb(if selected { palette::ACCENT_DK } else { palette::LABEL }))
+                    .child(c.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_rate_edit_currency(c, cx))),
+            );
+        }
+
+        h_flex().items_end().gap(px(10.)).flex_wrap().mt(px(16.)).pt(px(16.)).border_t_1().border_color(rgb(palette::HAIRLINE))
+            .child(labeled_field("Ставка за час", 110., &self.rate_input))
+            .child(
+                v_flex()
+                    .child(div().text_size(px(11.5)).text_color(rgb(palette::TEXT_3)).mb(px(5.)).child("Валюта"))
+                    .child(currency_row),
+            )
             .child(
                 div()
                     .id(("rate-save", pid as usize))
@@ -984,12 +1114,16 @@ impl ProjectsView {
             )
     }
 
-    fn pay_form(&self, pid: Id, cx: &mut Context<Self>) -> Div {
+    fn pay_form(&self, pid: Id, currency: Currency, cx: &mut Context<Self>) -> Div {
         h_flex().items_end().gap(px(10.)).flex_wrap().mt(px(16.)).pt(px(16.)).border_t_1().border_color(rgb(palette::HAIRLINE))
             .child(labeled_field("Часы", 74., &self.pay_hours_input))
             .child(labeled_field("Минуты", 82., &self.pay_minutes_input))
             .child(labeled_field("Дата оплаты", 130., &self.pay_date_input))
-            .child(labeled_field("Ставка, ₽/ч", 106., &self.pay_rate_input))
+            .child(labeled_field(
+                if currency == Currency::Rub { "Ставка, ₽/ч" } else { "Ставка/ч" },
+                106.,
+                &self.pay_rate_input,
+            ))
             .child(
                 div()
                     .id(("pay-submit", pid as usize))
@@ -1001,7 +1135,7 @@ impl ProjectsView {
             )
     }
 
-    fn payments_list(&self, pid: Id, cx: &mut Context<Self>) -> Div {
+    fn payments_list(&self, pid: Id, currency: Currency, cx: &mut Context<Self>) -> Div {
         let payments = self.app.read(cx).db.list_payments(pid).unwrap_or_default();
         if payments.is_empty() {
             return div()
@@ -1029,10 +1163,10 @@ impl ProjectsView {
                                     .mt(px(2.))
                                     .text_size(px(11.5))
                                     .text_color(rgb(palette::MUTED))
-                                    .child(format!("{} · {}/ч", display_date(&p.paid_date), format_money_ru(p.rate))),
+                                    .child(format!("{} · {}/ч", display_date(&p.paid_date), format_money(p.rate, currency))),
                             ),
                     )
-                    .child(div().text_size(px(13.5)).font_semibold().child(format_money_ru(amount)))
+                    .child(div().text_size(px(13.5)).font_semibold().child(format_money(amount, currency)))
                     .child(
                         div()
                             .id(("pay-del", pay_id as usize))

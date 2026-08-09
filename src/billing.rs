@@ -9,7 +9,7 @@
 
 use chrono::{Datelike, NaiveDateTime};
 
-use crate::models::{format_dur_ru, format_hours_ru, format_money_ru, ru_month_gen, Id};
+use crate::models::{format_dur_ru, format_hours_ru, format_money, ru_month_gen, Currency, Id};
 
 /// Sum of paid minutes across a project's payments, capped at its total
 /// tracked minutes.
@@ -110,6 +110,7 @@ pub fn build_invoice(
     paid_minutes_before: i64,
     limit_minutes: i64,
     rate: f64,
+    currency: Currency,
     project_id: Id,
     now: NaiveDateTime,
 ) -> Invoice {
@@ -147,7 +148,7 @@ pub fn build_invoice(
             range_label: e.range_label.clone(),
             hours_label: format_hours_ru(take),
             amount,
-            amount_label: format_money_ru(amount),
+            amount_label: format_money(amount, currency),
         });
     }
 
@@ -161,8 +162,8 @@ pub fn build_invoice(
         total_minutes: billed_minutes,
         total_hours_label: format_hours_ru(billed_minutes),
         total_amount,
-        total_amount_label: format_money_ru(total_amount),
-        rate_label: format!("{}/ч", format_money_ru(rate)),
+        total_amount_label: format_money(total_amount, currency),
+        rate_label: format!("{}/ч", format_money(rate, currency)),
         paid_before_label: format_dur_ru(paid_minutes_before.min(total_minutes) * 60),
         rest_after_label: (rest > 0).then(|| format_dur_ru(rest * 60)),
     }
@@ -213,7 +214,7 @@ mod tests {
         let paid_before = 90; // covers all of #1, 30 of #2
 
         // Limit only covers the partial's 30m remainder + 40 more of #3.
-        let invoice = build_invoice(&entries, paid_before, 70, 100.0, 42, now());
+        let invoice = build_invoice(&entries, paid_before, 70, 100.0, Currency::Rub, 42, now());
 
         assert_eq!(invoice.rows.len(), 2);
         assert_eq!(invoice.rows[0].desc, "partial (остаток)");
@@ -226,7 +227,7 @@ mod tests {
     #[test]
     fn build_invoice_full_unpaid_amount_has_no_rest() {
         let entries = vec![entry(1, 60, "a"), entry(2, 60, "b")];
-        let invoice = build_invoice(&entries, 0, 120, 100.0, 1, now());
+        let invoice = build_invoice(&entries, 0, 120, 100.0, Currency::Rub, 1, now());
         assert_eq!(invoice.rows.len(), 2);
         assert_eq!(invoice.total_minutes, 120);
         assert!(invoice.rest_after_label.is_none());

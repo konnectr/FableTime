@@ -79,6 +79,10 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_payments_project ON payments(project_id);
     "#,
+    // v6 — per-project billing currency (ISO 4217 code; NULL -> RUB).
+    r#"
+    ALTER TABLE projects ADD COLUMN currency TEXT;
+    "#,
 ];
 
 /// Heartbeats older than this (seconds) mean the app died without stopping the
@@ -170,19 +174,22 @@ impl Db {
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, client, color, note, archived, created_at, hourly_rate
+            "SELECT id, name, client, color, note, archived, created_at, hourly_rate, currency
              FROM projects WHERE archived = 0 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], row_to_project)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
-    /// Set (or clear) a project's hourly rate. `None`/`Some(<=0.0)` both mean
+    /// Set (or clear) a project's hourly rate and billing currency together
+    /// (edited via the same form). `None`/`Some(<=0.0)` for `rate` both mean
     /// "not billable".
-    pub fn set_project_rate(&self, id: Id, rate: Option<f64>) -> Result<()> {
+    pub fn set_project_billing(&self, id: Id, rate: Option<f64>, currency: Currency) -> Result<()> {
         let r = rate.filter(|r| *r > 0.0);
-        self.conn
-            .execute("UPDATE projects SET hourly_rate = ?2 WHERE id = ?1", params![id, r])?;
+        self.conn.execute(
+            "UPDATE projects SET hourly_rate = ?2, currency = ?3 WHERE id = ?1",
+            params![id, r, currency.code()],
+        )?;
         Ok(())
     }
 
@@ -404,6 +411,17 @@ impl Db {
         Ok(())
     }
 
+    /// Rename a finished entry's short description ("title") without
+    /// touching its time range or project — the quick fix for entries left
+    /// with a placeholder/garbled name. Blank/whitespace stores NULL
+    /// (`desc_or` then falls back to "Без названия").
+    pub fn set_entry_description(&self, id: Id, description: Option<&str>) -> Result<()> {
+        let d = description.map(str::trim).filter(|s| !s.is_empty());
+        self.conn
+            .execute("UPDATE time_entries SET description = ?2 WHERE id = ?1", params![id, d])?;
+        Ok(())
+    }
+
     fn entries_between(&self, lo: &str, hi: &str) -> Result<Vec<EntryDetail>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.project_id, e.description, e.note, e.start_ts, e.end_ts, e.created_at,
@@ -611,6 +629,7 @@ fn row_to_project(r: &Row) -> rusqlite::Result<Project> {
         archived: r.get::<_, i64>("archived")? != 0,
         created_at: r.get("created_at")?,
         hourly_rate: r.get("hourly_rate")?,
+        currency: Currency::from_code(&r.get::<_, Option<String>>("currency")?.unwrap_or_default()),
     })
 }
 
@@ -684,20 +703,40 @@ mod tests {
     }
 
     #[test]
+    fn entry_description_roundtrips_and_blanks_to_null() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        let eid = db.start_entry(pid, "asdasdasd").unwrap();
+        db.stop_running().unwrap();
+
+        db.set_entry_description(eid, Some("  Правки по макету  ")).unwrap();
+        let list = db.entries_between("1970-01-01T00:00:00Z", "2999-01-01T00:00:00Z").unwrap();
+        let get = |list: &[EntryDetail]| list.iter().find(|e| e.entry.id == eid).unwrap().entry.description.clone();
+        assert_eq!(get(&list).as_deref(), Some("Правки по макету")); // trimmed
+
+        db.set_entry_description(eid, Some("   ")).unwrap();
+        let list = db.entries_between("1970-01-01T00:00:00Z", "2999-01-01T00:00:00Z").unwrap();
+        assert_eq!(get(&list), None); // blank -> NULL
+    }
+
+    #[test]
     fn project_rate_roundtrips_and_none_means_unbillable() {
         let db = Db::open_in_memory().unwrap();
         let pid = db.create_project("Proj", None).unwrap();
         let get = |db: &Db| db.list_projects().unwrap().into_iter().find(|p| p.id == pid).unwrap();
 
         assert!(!get(&db).is_billable());
-        db.set_project_rate(pid, Some(3500.0)).unwrap();
+        assert_eq!(get(&db).currency, Currency::Rub); // default for a fresh project
+
+        db.set_project_billing(pid, Some(3500.0), Currency::Usd).unwrap();
         assert_eq!(get(&db).hourly_rate, Some(3500.0));
+        assert_eq!(get(&db).currency, Currency::Usd);
         assert!(get(&db).is_billable());
 
-        db.set_project_rate(pid, Some(0.0)).unwrap();
+        db.set_project_billing(pid, Some(0.0), Currency::Usd).unwrap();
         assert!(!get(&db).is_billable()); // <=0 stored as NULL
 
-        db.set_project_rate(pid, None).unwrap();
+        db.set_project_billing(pid, None, Currency::Rub).unwrap();
         assert_eq!(get(&db).hourly_rate, None);
     }
 

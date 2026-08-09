@@ -11,6 +11,60 @@ use serde::Serialize;
 
 pub type Id = i64;
 
+/// A project's billing currency. Stored as its ISO 4217 code; `Currency::Rub`
+/// is the fallback for projects created before this field existed (and for
+/// any unrecognized stored code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Currency {
+    Rub,
+    Byn,
+    Usd,
+    Eur,
+}
+
+impl Currency {
+    pub const ALL: [Currency; 4] = [Currency::Rub, Currency::Byn, Currency::Usd, Currency::Eur];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Currency::Rub => "RUB",
+            Currency::Byn => "BYN",
+            Currency::Usd => "USD",
+            Currency::Eur => "EUR",
+        }
+    }
+
+    /// Short label for currency pickers — RUB/BYN share the ₽/Br convention
+    /// but need distinct text since both are "рубли" to a Russian speaker.
+    pub fn label(self) -> &'static str {
+        match self {
+            Currency::Rub => "₽ RUB",
+            Currency::Byn => "Br BYN",
+            Currency::Usd => "$ USD",
+            Currency::Eur => "€ EUR",
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Currency::Rub => "₽",
+            Currency::Byn => "Br",
+            Currency::Usd => "$",
+            Currency::Eur => "€",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Currency {
+        Currency::ALL.into_iter().find(|c| c.code() == code).unwrap_or(Currency::Rub)
+    }
+}
+
+impl Default for Currency {
+    fn default() -> Self {
+        Currency::Rub
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     pub id: Id,
@@ -20,7 +74,8 @@ pub struct Project {
     pub note: Option<String>, // free-text project note (links, access…)
     pub archived: bool,
     pub created_at: String,
-    pub hourly_rate: Option<f64>, // ₽/hour; None or <=0 = not billable
+    pub hourly_rate: Option<f64>, // per-hour rate in `currency`; None or <=0 = not billable
+    pub currency: Currency,
 }
 
 impl Project {
@@ -29,8 +84,9 @@ impl Project {
     }
 }
 
-/// A recorded payment against a project: `minutes` paid for, at `rate` ₽/hour,
-/// on `paid_date` (local calendar date, "YYYY-MM-DD").
+/// A recorded payment against a project: `minutes` paid for, at `rate` per
+/// hour (in the project's `currency` at the time — see `Db::add_payment`), on
+/// `paid_date` (local calendar date, "YYYY-MM-DD").
 #[derive(Debug, Clone)]
 pub struct Payment {
     pub id: Id,
@@ -240,10 +296,10 @@ pub fn format_hours_ru(minutes: i64) -> String {
     format!("{:.2} ч", minutes as f64 / 60.0).replace('.', ",")
 }
 
-/// Money in ₽, thin-space-grouped thousands, rounded to the whole ruble —
-/// matches the mockup's `fmtMoney`, which always `Math.round`s and never
-/// shows kopecks.
-pub fn format_money_ru(amount: f64) -> String {
+/// Money in the given currency, thin-space-grouped thousands, rounded to the
+/// whole unit — matches the mockup's `fmtMoney`, which always `Math.round`s
+/// and never shows minor units (kopecks/cents).
+pub fn format_money(amount: f64, currency: Currency) -> String {
     let n = amount.round().max(0.0) as i64;
     let digits = n.to_string();
     let bytes = digits.as_bytes();
@@ -255,7 +311,8 @@ pub fn format_money_ru(amount: f64) -> String {
         }
         grouped.push(*b as char);
     }
-    grouped.push_str(" ₽");
+    grouped.push(' ');
+    grouped.push_str(currency.symbol());
     grouped
 }
 
@@ -340,11 +397,21 @@ mod tests {
     }
 
     #[test]
-    fn format_money_ru_groups_and_rounds() {
-        assert_eq!(format_money_ru(12500.0), "12\u{2009}500 ₽");
-        assert_eq!(format_money_ru(1234.5), "1\u{2009}235 ₽"); // rounds, no kopecks
-        assert_eq!(format_money_ru(900.0), "900 ₽");
-        assert_eq!(format_money_ru(-5.0), "0 ₽"); // never negative
+    fn format_money_groups_and_rounds() {
+        assert_eq!(format_money(12500.0, Currency::Rub), "12\u{2009}500 ₽");
+        assert_eq!(format_money(1234.5, Currency::Rub), "1\u{2009}235 ₽"); // rounds, no kopecks
+        assert_eq!(format_money(900.0, Currency::Usd), "900 $");
+        assert_eq!(format_money(-5.0, Currency::Rub), "0 ₽"); // never negative
+    }
+
+    #[test]
+    fn currency_code_roundtrips_and_unknown_falls_back_to_rub() {
+        assert_eq!(Currency::from_code("USD"), Currency::Usd);
+        assert_eq!(Currency::from_code("eur"), Currency::Rub); // case-sensitive; unknown -> Rub
+        assert_eq!(Currency::from_code(""), Currency::Rub);
+        for c in Currency::ALL {
+            assert_eq!(Currency::from_code(c.code()), c);
+        }
     }
 
     #[test]

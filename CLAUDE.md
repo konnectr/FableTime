@@ -72,7 +72,7 @@ src/
   main.rs        bootstrap: application().with_assets → gpui_component::init → window → Root
   palette.rs     design colors as u32 0xRRGGBB + per-project palette (gpui-free)
   models.rs      row structs + pure time helpers (UTC storage, local day/week grouping)
-  db.rs          SQLite: user_version migrations (v1→v5), CRUD, day/week totals, project
+  db.rs          SQLite: user_version migrations (v1→v6), CRUD, day/week totals, project
                  stats, range export
   app.rs         AppState entity: owns Connection + running-entry snapshot + 1s timer Task
   exporter.rs    pure (no-gpui) CSV/JSON/Markdown serialization + per-project/per-day totals
@@ -91,11 +91,13 @@ src/
 
 - **Data model:** an entry belongs directly to a **project** and carries a free-text
   **description** — there is no task layer. (Migration v2 in `db.rs` switched from the
-  original project→task→entry schema.) A project optionally carries an **`hourly_rate`**
-  (₽/h; `None`/`<=0` = not billable) and any number of **`payments`** rows (minutes paid,
-  rate, paid date) — `billing.rs` allocates paid minutes across a project's entries
-  oldest-first (FIFO) to derive per-entry paid/partial/unpaid status and to build a PDF
-  invoice (`invoice_pdf.rs`) for a chosen number of unpaid hours.
+  original project→task→entry schema.) A finished entry's description can be renamed
+  inline from the project detail view (`Db::set_entry_description`) without touching its
+  time range. A project optionally carries an **`hourly_rate`** in its **`currency`**
+  (`models::Currency`: RUB/BYN/USD/EUR; `None`/`<=0` rate = not billable) and any number of
+  **`payments`** rows (minutes paid, rate, paid date) — `billing.rs` allocates paid minutes
+  across a project's entries oldest-first (FIFO) to derive per-entry paid/partial/unpaid
+  status and to build a PDF invoice (`invoice_pdf.rs`) for a chosen number of unpaid hours.
 - **Timestamps** stored as **UTC RFC3339** (`…Z`) so lexicographic == chronological → range
   queries use plain `<`/`>=`. Convert to local only for display / grouping (`models.rs`).
 - **One running entry**: `Db::start_entry` stops any open entry first. A manual entry and a

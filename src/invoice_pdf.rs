@@ -159,6 +159,7 @@ pub fn render_pdf(html: &str) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::billing::{build_invoice, BillableEntry};
+    use crate::models::Currency;
 
     #[test]
     fn renders_a_real_pdf_with_cyrillic_text() {
@@ -173,7 +174,7 @@ mod tests {
             .unwrap()
             .and_hms_opt(15, 0, 0)
             .unwrap();
-        let invoice = build_invoice(&entries, 0, 90, 3500.0, 1, now);
+        let invoice = build_invoice(&entries, 0, 90, 3500.0, Currency::Rub, 1, now);
         let html = build_invoice_html(&invoice, "Сайт Acme", Some("Acme Inc."));
 
         let bytes = render_pdf(&html).expect("pdf renders");
@@ -183,7 +184,7 @@ mod tests {
 
     #[test]
     fn empty_invoice_still_renders() {
-        let invoice = build_invoice(&[], 0, 0, 3500.0, 1, chrono::Local::now().naive_local());
+        let invoice = build_invoice(&[], 0, 0, 3500.0, Currency::Rub, 1, chrono::Local::now().naive_local());
         let html = build_invoice_html(&invoice, "Project", None);
         let bytes = render_pdf(&html).expect("pdf renders even with no rows");
         assert!(bytes.starts_with(b"%PDF"));

@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0](https://github.com/konnectr/FableTime/compare/v0.5.0...v0.6.0) (2026-09-22)
+
+
+### Features
+
+* **billing:** track invoiced entries so a re-issued invoice excludes them ([cc034ba](https://github.com/konnectr/FableTime/commit/cc034ba9afa2c18155e8b53a44188751bceea098))
+
 ## [0.5.0](https://github.com/konnectr/FableTime/compare/v0.4.0...v0.5.0) (2026-08-09)
 
 

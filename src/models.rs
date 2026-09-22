@@ -97,6 +97,21 @@ pub struct Payment {
     pub created_at: String,
 }
 
+/// A generated PDF invoice's header row. The entries it covered (independent
+/// of whether they've since been paid) live in `invoice_items` — see
+/// `Db::invoiced_minutes_by_entry`; deleting the record (`Db::delete_invoice`)
+/// frees those minutes back up for a future invoice.
+#[derive(Debug, Clone)]
+pub struct InvoiceRecord {
+    pub id: Id,
+    pub project_id: Id,
+    pub number: String,
+    pub rate: f64,
+    pub total_minutes: i64,
+    pub total_amount: f64,
+    pub created_at: String,
+}
+
 /// A unit of tracked time: a project + description, with a start and an
 /// optional end (`None` = running). A live timer and a manual calendar entry
 /// are the same row.

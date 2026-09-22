@@ -40,8 +40,8 @@ pub fn build_invoice_html(invoice: &Invoice, project_name: &str, client: Option<
     }
 
     let table_or_empty = if invoice.rows.is_empty() {
-        "<p class=\"empty\">Нет задач для выставления: укажите количество часов в панели выше \
-         или запишите новое отработанное время.</p>"
+        "<p class=\"empty\">Нет отмеченных задач для выставления: вернитесь назад и отметьте \
+         хотя бы одну.</p>"
             .to_string()
     } else {
         format!(
@@ -50,12 +50,6 @@ pub fn build_invoice_html(invoice: &Invoice, project_name: &str, client: Option<
              <tbody>{rows_html}</tbody></table>"
         )
     };
-
-    let rest_sentence = invoice
-        .rest_after_label
-        .as_ref()
-        .map(|r| format!(" Остаток к оплате после этого счёта: {}.", esc(r)))
-        .unwrap_or_default();
 
     let client_label = client
         .map(str::trim)
@@ -113,7 +107,7 @@ td {{ border-bottom: 1px solid #f1f1f3; padding: 8px 8px 8px 0; }}
     <div class="totals-row"><span>Ставка</span><span>{rate}</span></div>
     <div class="totals-row grand"><span>Итого к&nbsp;оплате</span><span>{amount}</span></div>
   </div>
-  <div class="footnote">В счёт включены задачи, по которым оплата ещё не поступала. Ранее оплачено по проекту: {paid_before}.{rest_sentence}</div>
+  <div class="footnote">Счёт сформирован на основании выбранных отработанных задач по проекту «{project}».</div>
 </body></html>"#,
         font = FONT_FAMILY,
         number = esc(&invoice.number),
@@ -124,8 +118,6 @@ td {{ border-bottom: 1px solid #f1f1f3; padding: 8px 8px 8px 0; }}
         rate = esc(&invoice.rate_label),
         table_or_empty = table_or_empty,
         total_hours = esc(&invoice.total_hours_label),
-        paid_before = esc(&invoice.paid_before_label),
-        rest_sentence = rest_sentence,
     )
 }
 
@@ -158,23 +150,26 @@ pub fn render_pdf(html: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::billing::{build_invoice, BillableEntry};
+    use crate::billing::{build_invoice_from_selection, BillableEntry, InvoiceSelection};
     use crate::models::Currency;
 
     #[test]
     fn renders_a_real_pdf_with_cyrillic_text() {
-        let entries = vec![BillableEntry {
-            id: 1,
+        let selection = vec![InvoiceSelection {
+            entry: BillableEntry {
+                id: 1,
+                minutes: 90,
+                date_label: "24.06.2026".into(),
+                range_label: "09:00 – 10:30".into(),
+                desc: "Документация API".into(),
+            },
             minutes: 90,
-            date_label: "24.06.2026".into(),
-            range_label: "09:00 – 10:30".into(),
-            desc: "Документация API".into(),
         }];
         let now = chrono::NaiveDate::from_ymd_opt(2026, 6, 24)
             .unwrap()
             .and_hms_opt(15, 0, 0)
             .unwrap();
-        let invoice = build_invoice(&entries, 0, 90, 3500.0, Currency::Rub, 1, now);
+        let invoice = build_invoice_from_selection(&selection, 3500.0, Currency::Rub, 1, now);
         let html = build_invoice_html(&invoice, "Сайт Acme", Some("Acme Inc."));
 
         let bytes = render_pdf(&html).expect("pdf renders");
@@ -184,7 +179,7 @@ mod tests {
 
     #[test]
     fn empty_invoice_still_renders() {
-        let invoice = build_invoice(&[], 0, 0, 3500.0, Currency::Rub, 1, chrono::Local::now().naive_local());
+        let invoice = build_invoice_from_selection(&[], 3500.0, Currency::Rub, 1, chrono::Local::now().naive_local());
         let html = build_invoice_html(&invoice, "Project", None);
         let bytes = render_pdf(&html).expect("pdf renders even with no rows");
         assert!(bytes.starts_with(b"%PDF"));

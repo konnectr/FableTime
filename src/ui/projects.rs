@@ -17,8 +17,8 @@ use crate::db::{DayGroup, ProjectStat};
 use crate::icons::Lucide;
 use crate::invoice_pdf;
 use crate::models::{
-    format_date_ru, format_dur_ru, format_money, link_segments, local_hm, monday_of,
-    parse_date_ru, Currency, Id, Segment,
+    format_date_ru, format_dur_ru, format_hours_ru, format_money, link_segments, local_hm,
+    monday_of, parse_date_ru, Currency, Id, Segment,
 };
 use crate::palette;
 use crate::ui::common::{entry_row, paid_status_pill, EntryRow};
@@ -53,10 +53,11 @@ pub struct ProjectsView {
     pay_rate_input: Entity<InputState>,
 
     // Invoice ("Счёт на оплату") full-page screen: Some(id) shows it instead
-    // of that project's detail view.
+    // of that project's detail view. `invoice_selected` holds the checked
+    // entry ids for the invoice currently being built (defaults to "all
+    // not-yet-invoiced" on open, per-entry toggleable).
     invoice_project_id: Option<Id>,
-    invoice_hours_input: Entity<InputState>,
-    invoice_minutes_input: Entity<InputState>,
+    invoice_selected: std::collections::HashSet<Id>,
 
     status: SharedString,
 }
@@ -101,8 +102,6 @@ impl ProjectsView {
         let pay_minutes_input = cx.new(|cx| InputState::new(window, cx).placeholder("30"));
         let pay_date_input = cx.new(|cx| InputState::new(window, cx).placeholder("24.06.2026"));
         let pay_rate_input = cx.new(|cx| InputState::new(window, cx).placeholder("3500"));
-        let invoice_hours_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
-        let invoice_minutes_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
         let entry_rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Название задачи"));
 
         Self {
@@ -123,8 +122,7 @@ impl ProjectsView {
             pay_date_input,
             pay_rate_input,
             invoice_project_id: None,
-            invoice_hours_input,
-            invoice_minutes_input,
+            invoice_selected: std::collections::HashSet::new(),
             status: SharedString::default(),
         }
     }
@@ -227,6 +225,30 @@ impl ProjectsView {
             .collect()
     }
 
+    /// Entries with minutes not yet on any invoice (regardless of payment
+    /// status — see `Db::invoiced_minutes_by_entry`), oldest first, each
+    /// already reduced to its still-available remainder.
+    fn invoiceable_entries(&self, project_id: Id, cx: &Context<Self>) -> Vec<billing::BillableEntry> {
+        let invoiced = self
+            .app
+            .read(cx)
+            .db
+            .invoiced_minutes_by_entry(project_id)
+            .unwrap_or_default();
+        self.billable_entries(project_id, cx)
+            .into_iter()
+            .filter_map(|mut e| {
+                let already = invoiced.get(&e.id).copied().unwrap_or(0);
+                let remaining = (e.minutes - already).max(0);
+                if remaining <= 0 {
+                    return None;
+                }
+                e.minutes = remaining;
+                Some(e)
+            })
+            .collect()
+    }
+
     fn toggle_rate_edit(&mut self, current: Option<f64>, currency: Currency, window: &mut Window, cx: &mut Context<Self>) {
         if self.rate_edit_open {
             self.rate_edit_open = false;
@@ -297,48 +319,70 @@ impl ProjectsView {
         cx.notify();
     }
 
-    /// Open the invoice screen for a project, defaulting the hour/minute
-    /// selectors to the full unpaid amount.
-    fn open_invoice(&mut self, pid: Id, unpaid_minutes: i64, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the invoice screen for a project, defaulting to every
+    /// not-yet-invoiced entry checked.
+    fn open_invoice(&mut self, pid: Id, cx: &mut Context<Self>) {
         self.invoice_project_id = Some(pid);
         self.rate_edit_open = false;
         self.pay_form_open = false;
-        self.set_invoice_minutes(unpaid_minutes, window, cx);
+        self.select_all_invoiceable(pid, cx);
     }
 
     fn close_invoice(&mut self, cx: &mut Context<Self>) {
         self.invoice_project_id = None;
+        self.invoice_selected.clear();
         cx.notify();
     }
 
-    /// The "Всё · Xч Yм" quick-reset link, and the initial prefill in `open_invoice`.
-    fn set_invoice_minutes(&mut self, minutes: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let minutes = minutes.max(0);
-        self.invoice_hours_input
-            .update(cx, |s, cx| s.set_value((minutes / 60).to_string(), window, cx));
-        self.invoice_minutes_input
-            .update(cx, |s, cx| s.set_value((minutes % 60).to_string(), window, cx));
+    fn toggle_invoice_item(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !self.invoice_selected.remove(&id) {
+            self.invoice_selected.insert(id);
+        }
         cx.notify();
     }
 
-    fn invoice_limit_minutes(&self, cx: &Context<Self>) -> i64 {
-        let h: i64 = self.invoice_hours_input.read(cx).value().trim().parse().unwrap_or(0);
-        let m: i64 = self.invoice_minutes_input.read(cx).value().trim().parse().unwrap_or(0);
-        (h.max(0) * 60 + m.max(0)).max(0)
+    fn select_all_invoiceable(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.invoice_selected = self
+            .invoiceable_entries(project_id, cx)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        cx.notify();
+    }
+
+    fn select_none_invoice(&mut self, cx: &mut Context<Self>) {
+        self.invoice_selected.clear();
+        cx.notify();
     }
 
     /// Read the invoice's data on the main thread (the `rusqlite::Connection`
     /// never leaves it), render it to HTML, then hand the pure PDF-bytes
-    /// generation and file write to a background task via a native save dialog.
-    fn do_generate_invoice(&mut self, project_name: String, client: Option<String>, invoice: billing::Invoice, cx: &mut Context<Self>) {
+    /// generation and file write to a background task via a native save
+    /// dialog. Only on a successful write does it persist `items` as invoiced
+    /// (`Db::create_invoice`) — a cancelled dialog never locks entries out of
+    /// a future invoice.
+    fn do_generate_invoice(
+        &mut self,
+        project_id: Id,
+        project_name: String,
+        client: Option<String>,
+        rate: f64,
+        invoice: billing::Invoice,
+        items: Vec<(Id, i64)>,
+        cx: &mut Context<Self>,
+    ) {
         let html = invoice_pdf::build_invoice_html(&invoice, &project_name, client.as_deref());
         let file_name = format!("{}.pdf", project_name.replace(['/', '\\'], "-"));
+        let number = invoice.number.clone();
+        let total_minutes = invoice.total_minutes;
+        let total_amount = invoice.total_amount;
         self.status = "Сохранение…".into();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let Some(file) = rfd::AsyncFileDialog::new()
                 .set_title("Сохранить счёт")
                 .set_file_name(&file_name)
+                .add_filter("PDF", &["pdf"])
                 .save_file()
                 .await
             else {
@@ -348,7 +392,16 @@ impl ProjectsView {
                 });
                 return;
             };
-            let path = file.path().to_path_buf();
+            // Windows' save dialog only auto-appends the filter's extension
+            // when the user picks it from "Save as type"; if they typed a
+            // bare name (or on a backend that doesn't enforce it), force
+            // ".pdf" on ourselves rather than writing an extensionless file.
+            let mut path = file.path().to_path_buf();
+            if !matches!(path.extension().and_then(|e| e.to_str()), Some(ext) if ext.eq_ignore_ascii_case("pdf")) {
+                let mut name = path.file_name().unwrap_or_default().to_os_string();
+                name.push(".pdf");
+                path.set_file_name(name);
+            }
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -358,15 +411,25 @@ impl ProjectsView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.status = match &result {
-                    Ok(path) => format!("Счёт сохранён → {}", path.display()),
-                    Err(e) => format!("Ошибка сохранения счёта: {e:#}"),
-                }
-                .into();
-                // Open the saved PDF in the OS default viewer right away, so
-                // the user sees it land and doesn't have to hunt for it.
-                if let Ok(path) = &result {
-                    cx.open_with_system(path);
+                match &result {
+                    Ok(path) => {
+                        this.app.update(cx, |s, _| {
+                            if let Err(e) =
+                                s.db.create_invoice(project_id, &number, rate, total_minutes, total_amount, &items)
+                            {
+                                eprintln!("create_invoice: {e:#}");
+                            }
+                        });
+                        this.invoice_selected.clear();
+                        this.status = format!("Счёт сохранён → {}", path.display()).into();
+                        // Open the saved PDF in the OS default viewer right
+                        // away, so the user sees it land and doesn't have to
+                        // hunt for it.
+                        cx.open_with_system(path);
+                    }
+                    Err(e) => {
+                        this.status = format!("Ошибка сохранения счёта: {e:#}").into();
+                    }
                 }
                 cx.notify();
             });
@@ -420,24 +483,9 @@ impl Render for ProjectsView {
         if let Some(id) = self.open_id {
             if let Some(stat) = stats.iter().find(|s| s.project.id == id) {
                 if self.invoice_project_id == Some(id) {
-                    let entries = self.billable_entries(id, cx);
-                    let payments = self.app.read(cx).db.list_payments(id).unwrap_or_default();
-                    let paid_before = billing::paid_minutes_for_project(
-                        payments.iter().map(|p| p.minutes),
-                        stat.total_secs / 60,
-                    );
-                    let limit = self.invoice_limit_minutes(cx);
+                    let invoiceable = self.invoiceable_entries(id, cx);
                     let rate = stat.project.hourly_rate.unwrap_or(0.0);
-                    let invoice = billing::build_invoice(
-                        &entries,
-                        paid_before,
-                        limit,
-                        rate,
-                        stat.project.currency,
-                        id,
-                        Local::now().naive_local(),
-                    );
-                    return self.invoice_view(stat, &invoice, cx).into_any_element();
+                    return self.invoice_view(stat, &invoiceable, rate, cx).into_any_element();
                 }
                 let history = self.app.read(cx).db.project_history(id).unwrap_or_default();
                 return self.detail_view(stat, history, cx).into_any_element();
@@ -980,8 +1028,7 @@ impl ProjectsView {
 
         if billable {
             let mut actions = h_flex().gap(px(9.));
-            if unpaid_secs > 0 {
-                let unpaid_minutes = unpaid_secs / 60;
+            if !self.invoiceable_entries(pid, cx).is_empty() {
                 actions = actions.child(
                     div()
                         .id(("open-invoice", pid as usize))
@@ -992,8 +1039,8 @@ impl ProjectsView {
                         .hover(|s| s.border_color(rgb(0xc4c4cb)))
                         .child(Icon::new(Lucide::FileText).xsmall())
                         .child(div().child("Счёт на оплату"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_invoice(pid, unpaid_minutes, window, cx);
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_invoice(pid, cx);
                         })),
                 );
             }
@@ -1071,6 +1118,7 @@ impl ProjectsView {
         }
         if billable {
             block = block.child(self.payments_list(pid, currency, cx));
+            block = block.child(self.invoices_list(pid, currency, cx));
         }
         block
     }
@@ -1186,12 +1234,76 @@ impl ProjectsView {
         list
     }
 
+    /// Issued invoices, newest first, each with an undo (trash) button that
+    /// deletes the record and frees its entries back up for a future
+    /// invoice — the fix for a mis-picked or duplicate invoice.
+    fn invoices_list(&self, pid: Id, currency: Currency, cx: &mut Context<Self>) -> Div {
+        let invoices = self.app.read(cx).db.list_invoices(pid).unwrap_or_default();
+        if invoices.is_empty() {
+            return div();
+        }
+        let mut list = v_flex().mt(px(16.)).pt(px(6.)).border_t_1().border_color(rgb(palette::HAIRLINE))
+            .child(
+                div().mb(px(4.)).text_size(px(11.5)).text_color(rgb(palette::TEXT_3)).child("Выставленные счета"),
+            );
+        for inv in &invoices {
+            let inv_id = inv.id;
+            list = list.child(
+                h_flex().items_center().gap(px(12.)).py(px(11.)).border_b_1().border_color(rgb(palette::HAIRLINE_2))
+                    .child(Icon::new(Lucide::FileText).small().text_color(rgb(palette::MUTED)))
+                    .child(
+                        v_flex().flex_1().min_w(px(0.))
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_medium()
+                                    .child(format!("{} · {}", inv.number, format_dur_ru(inv.total_minutes * 60))),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(palette::MUTED))
+                                    .child(display_date(&inv.created_at[..10.min(inv.created_at.len())])),
+                            ),
+                    )
+                    .child(div().text_size(px(13.5)).font_semibold().child(format_money(inv.total_amount, currency)))
+                    .child(
+                        div()
+                            .id(("inv-del", inv_id as usize))
+                            .cursor_pointer().p(px(4.))
+                            .text_color(rgb(palette::NOTE_IDLE))
+                            .hover(|s| s.text_color(rgb(palette::DANGER)))
+                            .child(Icon::new(IconName::Delete).xsmall())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.app.update(cx, |s, _| {
+                                    let _ = s.db.delete_invoice(inv_id);
+                                });
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        list
+    }
+
     /// Full-page "Счёт на оплату": a toolbar (back link, hours/minutes to
     /// bill, a "Всё" quick-reset, "Скачать PDF") above a document-styled card
     /// built from the already-computed `billing::Invoice`.
-    fn invoice_view(&self, stat: &ProjectStat, invoice: &billing::Invoice, cx: &mut Context<Self>) -> Div {
-        let unpaid_secs = (stat.total_secs - stat.paid_secs).max(0);
-        let unpaid_minutes = unpaid_secs / 60;
+    /// `invoiceable` is every entry with minutes not yet on any invoice
+    /// (regardless of payment status), `minutes` on each already reduced to
+    /// the still-available remainder — see `invoiceable_entries`.
+    fn invoice_view(&self, stat: &ProjectStat, invoiceable: &[billing::BillableEntry], rate: f64, cx: &mut Context<Self>) -> Div {
+        let pid = stat.project.id;
+        let currency = stat.project.currency;
+        let selection: Vec<billing::InvoiceSelection> = invoiceable
+            .iter()
+            .filter(|e| self.invoice_selected.contains(&e.id))
+            .map(|e| billing::InvoiceSelection { entry: e.clone(), minutes: e.minutes })
+            .collect();
+        let items: Vec<(Id, i64)> = selection.iter().map(|s| (s.entry.id, s.minutes)).collect();
+        let invoice = billing::build_invoice_from_selection(&selection, rate, currency, pid, Local::now().naive_local());
+
         let project_name = stat.project.name.clone();
         let client = stat.project.client.clone().filter(|c| !c.trim().is_empty());
         let dl_project_name = project_name.clone();
@@ -1207,28 +1319,31 @@ impl ProjectsView {
             .child(div().child("Назад к проекту"))
             .on_click(cx.listener(|this, _, _, cx| this.close_invoice(cx)));
 
-        let toolbar = h_flex().items_center().gap(px(14.)).flex_wrap().mb(px(22.))
+        let mut toolbar = h_flex().items_center().gap(px(14.)).flex_wrap().mb(px(22.))
             .child(back)
             .child(
-                h_flex().items_center().gap(px(7.)).ml(px(18.)).pl(px(18.)).border_l_1().border_color(rgb(palette::BORDER))
-                    .child(div().text_size(px(12.5)).text_color(rgb(palette::TEXT_2)).child("Выставить за"))
-                    .child(div().w(px(54.)).child(Input::new(&self.invoice_hours_input)))
-                    .child(div().text_size(px(12.5)).text_color(rgb(palette::MUTED)).child("ч"))
-                    .child(div().w(px(54.)).child(Input::new(&self.invoice_minutes_input)))
-                    .child(div().text_size(px(12.5)).text_color(rgb(palette::MUTED)).child("м"))
+                h_flex().items_center().gap(px(10.)).ml(px(18.)).pl(px(18.)).border_l_1().border_color(rgb(palette::BORDER))
                     .child(
-                        div()
-                            .id("inv-all")
-                            .cursor_pointer().ml(px(6.))
+                        div().id("inv-select-all").cursor_pointer()
                             .text_size(px(12.5)).font_medium().text_color(rgb(palette::ACCENT))
-                            .child(format!("Всё · {}", format_dur_ru(unpaid_secs)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.set_invoice_minutes(unpaid_minutes, window, cx);
-                            })),
+                            .child("Выбрать все")
+                            .on_click(cx.listener(move |this, _, _, cx| this.select_all_invoiceable(pid, cx))),
+                    )
+                    .child(div().text_size(px(12.5)).text_color(rgb(palette::BORDER)).child("·"))
+                    .child(
+                        div().id("inv-select-none").cursor_pointer()
+                            .text_size(px(12.5)).font_medium().text_color(rgb(palette::TEXT_2))
+                            .child("Снять все")
+                            .on_click(cx.listener(|this, _, _, cx| this.select_none_invoice(cx))),
+                    )
+                    .child(
+                        div().text_size(px(12.5)).text_color(rgb(palette::MUTED))
+                            .child(format!("Отмечено {} из {}", selection.len(), invoiceable.len())),
                     ),
             )
-            .child(div().flex_1())
-            .child(
+            .child(div().flex_1());
+        if !selection.is_empty() {
+            toolbar = toolbar.child(
                 div()
                     .id("inv-download")
                     .flex().items_center().gap(px(8.)).px(px(18.)).h(px(36.)).rounded(px(10.))
@@ -1237,37 +1352,61 @@ impl ProjectsView {
                     .child(Icon::new(Lucide::Download).xsmall().text_color(rgb(0xffffff)))
                     .child(div().child("Скачать PDF"))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.do_generate_invoice(dl_project_name.clone(), dl_client.clone(), dl_invoice.clone(), cx);
+                        this.do_generate_invoice(
+                            pid,
+                            dl_project_name.clone(),
+                            dl_client.clone(),
+                            rate,
+                            dl_invoice.clone(),
+                            items.clone(),
+                            cx,
+                        );
                     })),
             );
+        }
 
+        // Each row doubles as the checkbox picker and the PDF-table preview.
         let mut rows_col = v_flex();
-        for r in &invoice.rows {
+        for e in invoiceable {
+            let eid = e.id;
+            let checked = self.invoice_selected.contains(&eid);
+            let amount = e.minutes as f64 / 60.0 * rate;
             rows_col = rows_col.child(
                 h_flex().items_center().gap(px(10.)).py(px(10.)).border_b_1().border_color(rgb(palette::HAIRLINE))
-                    .child(div().w(px(88.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(r.date_label.clone()))
-                    .child(div().flex_1().min_w(px(0.)).text_size(px(13.)).font_medium().child(r.desc.clone()))
-                    .child(div().w(px(120.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(r.range_label.clone()))
-                    .child(div().w(px(64.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(r.hours_label.clone()))
-                    .child(div().w(px(90.)).flex_shrink_0().text_size(px(13.)).font_semibold().child(r.amount_label.clone())),
+                    .child(
+                        div()
+                            .id(("inv-check", eid as usize))
+                            .flex_shrink_0().w(px(18.)).h(px(18.))
+                            .flex().items_center().justify_center()
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(rgb(if checked { palette::ACCENT } else { palette::BORDER }))
+                            .bg(rgb(if checked { palette::ACCENT } else { palette::CARD }))
+                            .when(checked, |d| d.child(Icon::new(IconName::Check).xsmall().text_color(rgb(0xffffff))))
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_invoice_item(eid, cx))),
+                    )
+                    .child(div().w(px(88.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(e.date_label.clone()))
+                    .child(div().flex_1().min_w(px(0.)).text_size(px(13.)).font_medium().child(e.desc.clone()))
+                    .child(div().w(px(120.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(e.range_label.clone()))
+                    .child(div().w(px(64.)).flex_shrink_0().text_size(px(12.5)).text_color(rgb(palette::LABEL)).child(format_hours_ru(e.minutes)))
+                    .child(div().w(px(90.)).flex_shrink_0().text_size(px(13.)).font_semibold().child(format_money(amount, currency))),
             );
         }
-        let body: AnyElement = if invoice.rows.is_empty() {
+        let body: AnyElement = if invoiceable.is_empty() {
             div()
                 .py(px(26.)).text_size(px(13.)).text_color(rgb(palette::MUTED))
-                .child("Нет задач для выставления: укажите количество часов выше или запишите новое отработанное время.")
+                .child("Все отработанное время по проекту уже выставлено в счетах. Отработайте что-то новое, чтобы выставить следующий счёт.")
                 .into_any_element()
         } else {
             rows_col.into_any_element()
         };
 
-        let mut footnote = format!(
-            "В счёт включены задачи, по которым оплата ещё не поступала. Ранее оплачено по проекту: {}.",
-            invoice.paid_before_label
+        let footnote = format!(
+            "Счёт формируется из отмеченных задач; отмеченные и сохранённые в PDF задачи \
+             больше не будут предлагаться в следующих счетах по проекту «{}».",
+            stat.project.name
         );
-        if let Some(rest) = &invoice.rest_after_label {
-            footnote.push_str(&format!(" Остаток к оплате после этого счёта: {rest}."));
-        }
 
         let client_label = client.clone().unwrap_or_else(|| "Без клиента".into());
         let doc = v_flex()

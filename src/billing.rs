@@ -4,12 +4,17 @@
 //! Works in whole minutes (matching the `payments.minutes` column); callers
 //! convert seconds <-> minutes at the boundary. Payments are always applied
 //! to a project's entries oldest-first (the oldest tracked time is the oldest
-//! debt), via the single `allocate_fifo` primitive shared by both the
-//! per-entry paid/partial/unpaid status and invoice-row building below.
+//! debt), via the `allocate_fifo` primitive — used for the per-entry
+//! paid/partial/unpaid *display* status only. Invoicing is a separate,
+//! independent ledger (`Db::invoiced_minutes_by_entry` / `create_invoice`):
+//! an invoice bills an explicit, user-checked set of entries
+//! (`build_invoice_from_selection`), and once saved those minutes are
+//! excluded from future invoices regardless of payment status — see
+//! `ui/projects.rs`'s invoice screen.
 
 use chrono::{Datelike, NaiveDateTime};
 
-use crate::models::{format_dur_ru, format_hours_ru, format_money, ru_month_gen, Currency, Id};
+use crate::models::{format_hours_ru, format_money, ru_month_gen, Currency, Id};
 
 /// Sum of paid minutes across a project's payments, capped at its total
 /// tracked minutes.
@@ -93,79 +98,56 @@ pub struct Invoice {
     pub total_amount: f64,
     pub total_amount_label: String,
     pub rate_label: String,
-    pub paid_before_label: String,
-    /// `Some(...)` only when `limit_minutes` billed less than the full
-    /// unpaid total — mirrors the mockup's footnote.
-    pub rest_after_label: Option<String>,
 }
 
-/// Build invoice rows for up to `limit_minutes` of unpaid time, oldest entry
-/// first: entries already fully paid are skipped; a partially-paid entry's
-/// unpaid remainder is taken first, then whole unpaid entries, until
-/// `limit_minutes` runs out. A row cut short by the limit is marked
-/// "(частично)" in its description; the tail of an already-partial entry is
-/// marked "(остаток)" (a row that is both gets "(частично, остаток)").
-pub fn build_invoice(
-    entries_oldest_first: &[BillableEntry],
-    paid_minutes_before: i64,
-    limit_minutes: i64,
+/// An entry checked for a new invoice, already resolved to how many of its
+/// minutes to bill (normally its full still-uninvoiced remainder — see
+/// `Db::invoiced_minutes_by_entry` — computed by the caller before this is
+/// built, since availability is a DB concern, not a billing-math one).
+#[derive(Debug, Clone)]
+pub struct InvoiceSelection {
+    pub entry: BillableEntry,
+    pub minutes: i64,
+}
+
+/// Build an invoice from an explicit, user-checked set of entries. Unlike the
+/// old FIFO/hour-limit model, a checkbox is either on or off — no partial-
+/// entry slicing — so each row simply bills the minutes it was given.
+pub fn build_invoice_from_selection(
+    selection: &[InvoiceSelection],
     rate: f64,
     currency: Currency,
     project_id: Id,
     now: NaiveDateTime,
 ) -> Invoice {
-    let mins: Vec<i64> = entries_oldest_first.iter().map(|e| e.minutes).collect();
-    let already_paid = allocate_fifo(&mins, paid_minutes_before);
-    let total_minutes: i64 = mins.iter().sum();
-    let unpaid_total = (total_minutes - paid_minutes_before.min(total_minutes)).max(0);
-    let mut left = limit_minutes.max(0).min(unpaid_total);
-
     let mut rows = Vec::new();
-    let mut billed_minutes = 0i64;
-    for (e, paid_before) in entries_oldest_first.iter().zip(&already_paid) {
-        if left <= 0 {
-            break;
-        }
-        let remainder = (e.minutes - paid_before).max(0);
-        if remainder <= 0 {
+    let mut total_minutes = 0i64;
+    for sel in selection {
+        if sel.minutes <= 0 {
             continue;
         }
-        let take = remainder.min(left);
-        left -= take;
-        billed_minutes += take;
-
-        let mut desc = e.desc.clone();
-        match (*paid_before > 0, take < remainder) {
-            (true, true) => desc.push_str(" (частично, остаток)"),
-            (true, false) => desc.push_str(" (остаток)"),
-            (false, true) => desc.push_str(" (частично)"),
-            (false, false) => {}
-        }
-        let amount = take as f64 / 60.0 * rate;
+        total_minutes += sel.minutes;
+        let amount = sel.minutes as f64 / 60.0 * rate;
         rows.push(InvoiceRow {
-            date_label: e.date_label.clone(),
-            desc,
-            range_label: e.range_label.clone(),
-            hours_label: format_hours_ru(take),
+            date_label: sel.entry.date_label.clone(),
+            desc: sel.entry.desc.clone(),
+            range_label: sel.entry.range_label.clone(),
+            hours_label: format_hours_ru(sel.minutes),
             amount,
             amount_label: format_money(amount, currency),
         });
     }
-
-    let total_amount = billed_minutes as f64 / 60.0 * rate;
-    let rest = (unpaid_total - billed_minutes).max(0);
+    let total_amount = total_minutes as f64 / 60.0 * rate;
 
     Invoice {
         number: format!("СЧ-{project_id}-{}", now.format("%Y%m%d-%H%M")),
         date_label: format!("{} {} {}", now.day(), ru_month_gen(now.month()), now.year()),
         rows,
-        total_minutes: billed_minutes,
-        total_hours_label: format_hours_ru(billed_minutes),
+        total_minutes,
+        total_hours_label: format_hours_ru(total_minutes),
         total_amount,
         total_amount_label: format_money(total_amount, currency),
         rate_label: format!("{}/ч", format_money(rate, currency)),
-        paid_before_label: format_dur_ru(paid_minutes_before.min(total_minutes) * 60),
-        rest_after_label: (rest > 0).then(|| format_dur_ru(rest * 60)),
     }
 }
 
@@ -208,28 +190,30 @@ mod tests {
     }
 
     #[test]
-    fn build_invoice_skips_paid_takes_partial_remainder_then_stops_at_limit() {
-        // Oldest first: 60m paid, 60m partial (30 paid, 30 owed), 120m unpaid.
-        let entries = vec![entry(1, 60, "paid"), entry(2, 60, "partial"), entry(3, 120, "fresh")];
-        let paid_before = 90; // covers all of #1, 30 of #2
-
-        // Limit only covers the partial's 30m remainder + 40 more of #3.
-        let invoice = build_invoice(&entries, paid_before, 70, 100.0, Currency::Rub, 42, now());
+    fn build_invoice_from_selection_bills_exactly_the_checked_minutes() {
+        // A checked entry with only 30 of its 60 minutes still uninvoiced
+        // (the caller resolves that before building the selection) bills
+        // just those 30 — no partial-slicing/labeling inside billing itself.
+        let selection = vec![
+            InvoiceSelection { entry: entry(1, 60, "partial"), minutes: 30 },
+            InvoiceSelection { entry: entry(2, 120, "fresh"), minutes: 120 },
+        ];
+        let invoice = build_invoice_from_selection(&selection, 100.0, Currency::Rub, 42, now());
 
         assert_eq!(invoice.rows.len(), 2);
-        assert_eq!(invoice.rows[0].desc, "partial (остаток)");
-        assert_eq!(invoice.rows[1].desc, "fresh (частично)");
-        assert_eq!(invoice.total_minutes, 70);
-        assert_eq!(invoice.total_amount, 70.0 / 60.0 * 100.0);
-        assert!(invoice.rest_after_label.is_some());
+        assert_eq!(invoice.rows[0].desc, "partial"); // description untouched
+        assert_eq!(invoice.total_minutes, 150);
+        assert_eq!(invoice.total_amount, 150.0 / 60.0 * 100.0);
     }
 
     #[test]
-    fn build_invoice_full_unpaid_amount_has_no_rest() {
-        let entries = vec![entry(1, 60, "a"), entry(2, 60, "b")];
-        let invoice = build_invoice(&entries, 0, 120, 100.0, Currency::Rub, 1, now());
-        assert_eq!(invoice.rows.len(), 2);
-        assert_eq!(invoice.total_minutes, 120);
-        assert!(invoice.rest_after_label.is_none());
+    fn build_invoice_from_selection_skips_zero_minute_entries() {
+        let selection = vec![
+            InvoiceSelection { entry: entry(1, 60, "a"), minutes: 0 },
+            InvoiceSelection { entry: entry(2, 60, "b"), minutes: 60 },
+        ];
+        let invoice = build_invoice_from_selection(&selection, 100.0, Currency::Rub, 1, now());
+        assert_eq!(invoice.rows.len(), 1);
+        assert_eq!(invoice.total_minutes, 60);
     }
 }

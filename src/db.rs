@@ -83,6 +83,29 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE projects ADD COLUMN currency TEXT;
     "#,
+    // v7 — record which entries were put on a generated invoice (independent
+    // of whether they've been paid), so a later invoice never re-offers them.
+    r#"
+    CREATE TABLE invoices (
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id),
+      number TEXT NOT NULL,
+      rate REAL NOT NULL,
+      total_minutes INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_invoices_project ON invoices(project_id);
+
+    CREATE TABLE invoice_items (
+      id INTEGER PRIMARY KEY,
+      invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      entry_id INTEGER NOT NULL REFERENCES time_entries(id),
+      minutes INTEGER NOT NULL
+    );
+    CREATE INDEX idx_invoice_items_invoice ON invoice_items(invoice_id);
+    CREATE INDEX idx_invoice_items_entry ON invoice_items(entry_id);
+    "#,
 ];
 
 /// Heartbeats older than this (seconds) mean the app died without stopping the
@@ -266,6 +289,69 @@ impl Db {
         )?;
         let rows = stmt.query_map(params![project_id], row_to_entry)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    // --- invoices ---------------------------------------------------------
+
+    /// Persist a generated invoice: header + exactly the entries (and minutes
+    /// of each) it covered. Call this only after the PDF has actually been
+    /// saved, so a cancelled save dialog never marks time as invoiced.
+    pub fn create_invoice(
+        &self,
+        project_id: Id,
+        number: &str,
+        rate: f64,
+        total_minutes: i64,
+        total_amount: f64,
+        items: &[(Id, i64)], // (entry_id, minutes)
+    ) -> Result<Id> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO invoices (project_id, number, rate, total_minutes, total_amount, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project_id, number, rate, total_minutes, total_amount, now_rfc3339()],
+        )?;
+        let invoice_id = tx.last_insert_rowid();
+        for (entry_id, minutes) in items {
+            tx.execute(
+                "INSERT INTO invoice_items (invoice_id, entry_id, minutes) VALUES (?1, ?2, ?3)",
+                params![invoice_id, entry_id, minutes],
+            )?;
+        }
+        tx.commit()?;
+        Ok(invoice_id)
+    }
+
+    /// A project's issued invoices, newest first.
+    pub fn list_invoices(&self, project_id: Id) -> Result<Vec<InvoiceRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, number, rate, total_minutes, total_amount, created_at
+             FROM invoices WHERE project_id = ?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![project_id], row_to_invoice)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Undo a mistaken invoice — deletes it and (via `ON DELETE CASCADE`) its
+    /// items, freeing those minutes back up for a future invoice. Does not
+    /// touch any recorded payment.
+    pub fn delete_invoice(&self, id: Id) -> Result<()> {
+        self.conn.execute("DELETE FROM invoices WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Already-invoiced minutes per entry, for every entry belonging to
+    /// `project_id` that has ever appeared on an invoice — regardless of
+    /// whether it's since been paid. Building a new invoice excludes these.
+    pub fn invoiced_minutes_by_entry(&self, project_id: Id) -> Result<std::collections::HashMap<Id, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ii.entry_id, SUM(ii.minutes)
+             FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+             WHERE i.project_id = ?1
+             GROUP BY ii.entry_id",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| Ok((r.get::<_, Id>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>().map_err(Into::into)
     }
 
     // --- time entries -------------------------------------------------------
@@ -656,6 +742,18 @@ fn row_to_payment(r: &Row) -> rusqlite::Result<Payment> {
     })
 }
 
+fn row_to_invoice(r: &Row) -> rusqlite::Result<InvoiceRecord> {
+    Ok(InvoiceRecord {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        number: r.get("number")?,
+        rate: r.get("rate")?,
+        total_minutes: r.get("total_minutes")?,
+        total_amount: r.get("total_amount")?,
+        created_at: r.get("created_at")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,5 +852,77 @@ mod tests {
 
         db.delete_payment(list[0].id).unwrap();
         assert_eq!(db.list_payments(pid).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invoice_tracks_entries_and_deleting_frees_them_again() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        let e1 = db.start_entry(pid, "a").unwrap();
+        db.stop_running().unwrap();
+        let e2 = db.start_entry(pid, "b").unwrap();
+        db.stop_running().unwrap();
+
+        assert!(db.invoiced_minutes_by_entry(pid).unwrap().is_empty());
+
+        let inv_id = db
+            .create_invoice(pid, "СЧ-1", 3500.0, 90, 5250.0, &[(e1, 60), (e2, 30)])
+            .unwrap();
+
+        let invoiced = db.invoiced_minutes_by_entry(pid).unwrap();
+        assert_eq!(invoiced.get(&e1), Some(&60));
+        assert_eq!(invoiced.get(&e2), Some(&30));
+
+        let list = db.list_invoices(pid).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, inv_id);
+        assert_eq!(list[0].total_minutes, 90);
+
+        db.delete_invoice(inv_id).unwrap();
+        assert!(db.invoiced_minutes_by_entry(pid).unwrap().is_empty()); // freed
+        assert!(db.list_invoices(pid).unwrap().is_empty());
+    }
+
+    /// Regression test for the reported bug: after invoice #1 covers some
+    /// entries in full and gets paid, building invoice #2 for the same
+    /// project must not re-offer that already-invoiced time — independent of
+    /// whether a payment was ever recorded for it.
+    #[test]
+    fn second_invoice_excludes_entries_already_on_a_prior_invoice() {
+        let db = Db::open_in_memory().unwrap();
+        let pid = db.create_project("Proj", None).unwrap();
+        let t0 = Utc::now();
+        let a = db
+            .add_manual_entry(pid, t0, t0 + Duration::minutes(60), Some("Task A"))
+            .unwrap();
+        let b = db
+            .add_manual_entry(pid, t0, t0 + Duration::minutes(90), Some("Task B"))
+            .unwrap();
+        let c = db
+            .add_manual_entry(pid, t0, t0 + Duration::minutes(45), Some("Task C"))
+            .unwrap(); // stays uninvoiced
+
+        // Invoice #1 covers A (fully) and B (fully); client pays it.
+        db.create_invoice(pid, "СЧ-1", 3500.0, 150, 8750.0, &[(a, 60), (b, 90)]).unwrap();
+        db.add_payment(pid, 150, 3500.0, "2026-09-10").unwrap();
+
+        // Building invoice #2's candidate list: entries minus already-invoiced minutes.
+        let invoiced = db.invoiced_minutes_by_entry(pid).unwrap();
+        let entries = db.entries_for_project_asc(pid).unwrap();
+        let now = Utc::now();
+        let remaining: Vec<(Id, i64)> = entries
+            .iter()
+            .map(|e| {
+                let total = e.duration_secs(now) / 60;
+                let already = invoiced.get(&e.id).copied().unwrap_or(0);
+                (e.id, (total - already).max(0))
+            })
+            .filter(|(_, m)| *m > 0)
+            .collect();
+
+        // Only C remains — A and B are excluded even though a payment was
+        // recorded (invoiced status, not paid status, gates re-offering).
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, c);
     }
 }

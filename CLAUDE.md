@@ -72,7 +72,7 @@ src/
   main.rs        bootstrap: application().with_assets → gpui_component::init → window → Root
   palette.rs     design colors as u32 0xRRGGBB + per-project palette (gpui-free)
   models.rs      row structs + pure time helpers (UTC storage, local day/week grouping)
-  db.rs          SQLite: user_version migrations (v1→v6), CRUD, day/week totals, project
+  db.rs          SQLite: user_version migrations (v1→v7), CRUD, day/week totals, project
                  stats, range export
   app.rs         AppState entity: owns Connection + running-entry snapshot + 1s timer Task
   exporter.rs    pure (no-gpui) CSV/JSON/Markdown serialization + per-project/per-day totals
@@ -97,7 +97,12 @@ src/
   (`models::Currency`: RUB/BYN/USD/EUR; `None`/`<=0` rate = not billable) and any number of
   **`payments`** rows (minutes paid, rate, paid date) — `billing.rs` allocates paid minutes
   across a project's entries oldest-first (FIFO) to derive per-entry paid/partial/unpaid
-  status and to build a PDF invoice (`invoice_pdf.rs`) for a chosen number of unpaid hours.
+  status. **Invoicing is a separate ledger from paying**: generating a PDF invoice checks off
+  specific entries (`ui/projects.rs`'s invoice screen) and, once actually saved,
+  `Db::create_invoice` persists an `invoices` + `invoice_items` row per entry — those minutes
+  are then excluded from every future invoice (`Db::invoiced_minutes_by_entry`) regardless of
+  whether they've been paid; `Db::delete_invoice` undoes a mis-picked invoice and frees them
+  back up.
 - **Timestamps** stored as **UTC RFC3339** (`…Z`) so lexicographic == chronological → range
   queries use plain `<`/`>=`. Convert to local only for display / grouping (`models.rs`).
 - **One running entry**: `Db::start_entry` stops any open entry first. A manual entry and a
